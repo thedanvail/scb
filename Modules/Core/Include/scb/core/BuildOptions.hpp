@@ -1,5 +1,8 @@
 #pragma once
 
+#include "scb/core/Path.hpp"
+
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,8 +33,14 @@ struct ManifestBuildOptions {
     bool debugInfo = false;
 };
 
+struct ResolvedIncludeDir {
+    ProjectPath path;
+
+    [[nodiscard]] bool operator==(const ResolvedIncludeDir&) const = default;
+};
+
 struct ResolvedBuildOptions {
-    std::vector<std::string> includeDirs;
+    std::vector<ResolvedIncludeDir> includeDirs;
     std::map<std::string, std::string> defines;
     std::vector<std::string> compileFlags;
     std::vector<std::string> linkFlags;

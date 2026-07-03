@@ -1,0 +1,11 @@
+[project]
+name = "broken"
+standard = "c++20"
+
+[toolchain]
+compiler = "toolchains/not-real-cxx"
+
+[[target]]
+name = "broken"
+kind = "exe"
+sources = { include = ["src/main.cpp"] }

@@ -12,6 +12,11 @@ target_include_directories(scb_core
         "${CMAKE_CURRENT_SOURCE_DIR}/Include"
 )
 
+target_link_libraries(scb_core
+    PRIVATE
+        toml11::toml11
+)
+
 if(SCB_BUILD_TESTS)
     file(GLOB_RECURSE core_test_sources CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/Tests/*.cpp"

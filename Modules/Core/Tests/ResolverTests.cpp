@@ -1,4 +1,5 @@
 #include "scb/core/ResolvedProject.hpp"
+#include "scb/core/ManifestParser.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -28,6 +29,15 @@ std::string Diagnostics(const scb::ResolveResult& result)
 {
     std::ostringstream stream;
     for (const auto& diagnostic : result.diagnostics) {
+        stream << diagnostic.message << '\n';
+    }
+    return stream.str();
+}
+
+std::string Diagnostics(const std::vector<scb::Diagnostic>& diagnostics)
+{
+    std::ostringstream stream;
+    for (const auto& diagnostic : diagnostics) {
         stream << diagnostic.message << '\n';
     }
     return stream.str();
@@ -68,6 +78,7 @@ TEST_CASE("resolver infers a zero-config executable", "[resolver]")
     REQUIRE(result.project.targets.size() == 1);
 
     const auto& target = FindTarget(result, scb::TargetKind::Executable, root.filename().string());
+    REQUIRE(target.origin == scb::TargetOrigin::Inferred);
     REQUIRE(target.sources.compileSources.size() == 1);
     REQUIRE(target.sources.compileSources.front().path.relative == "src/main.cpp");
     REQUIRE(target.dependencies.empty());
@@ -87,11 +98,13 @@ TEST_CASE("resolver infers library plus executable for zero-config project", "[r
     REQUIRE(result.project.targets.size() == 2);
 
     const auto& library = FindTarget(result, scb::TargetKind::StaticLibrary, root.filename().string());
+    REQUIRE(library.origin == scb::TargetOrigin::Inferred);
     REQUIRE(library.sources.compileSources.size() == 2);
     REQUIRE(library.sources.compileSources[0].path.relative == "src/feature.cpp");
     REQUIRE(library.sources.compileSources[1].path.relative == "src/lib.cpp");
 
     const auto& executable = FindTarget(result, scb::TargetKind::Executable, root.filename().string());
+    REQUIRE(executable.origin == scb::TargetOrigin::Inferred);
     REQUIRE(executable.dependencies.size() == 1);
     REQUIRE(executable.dependencies.front().kind == scb::TargetKind::StaticLibrary);
     REQUIRE(executable.dependencies.front().name == root.filename().string());
@@ -107,10 +120,11 @@ TEST_CASE("resolver infers a header-only library from include directory", "[reso
     REQUIRE(result.ok());
     INFO(Diagnostics(result));
     const auto& target = FindTarget(result, scb::TargetKind::HeaderOnly, root.filename().string());
+    REQUIRE(target.origin == scb::TargetOrigin::Inferred);
     REQUIRE(target.sources.headers.size() == 1);
     REQUIRE(target.sources.compileSources.empty());
     REQUIRE(target.build.includeDirs.size() == 1);
-    REQUIRE(target.build.includeDirs.front() == "include");
+    REQUIRE(target.build.includeDirs.front().path.relative == "include");
 }
 
 TEST_CASE("explicit manifest targets suppress zero-config discovery", "[resolver]")
@@ -121,7 +135,7 @@ TEST_CASE("explicit manifest targets suppress zero-config discovery", "[resolver
 
     auto request = Request(root);
     request.hasManifest = true;
-    request.manifest.name = "explicit";
+    request.manifest.project.name = "explicit";
 
     scb::ManifestTarget target;
     target.name = "tool";
@@ -134,7 +148,8 @@ TEST_CASE("explicit manifest targets suppress zero-config discovery", "[resolver
     REQUIRE(result.ok());
     INFO(Diagnostics(result));
     REQUIRE(result.project.targets.size() == 1);
-    static_cast<void>(FindTarget(result, scb::TargetKind::Executable, "tool"));
+    const auto& resolved = FindTarget(result, scb::TargetKind::Executable, "tool");
+    REQUIRE(resolved.origin == scb::TargetOrigin::Explicit);
 }
 
 TEST_CASE("resolver expands globs and sorts results deterministically", "[resolver]")
@@ -146,7 +161,7 @@ TEST_CASE("resolver expands globs and sorts results deterministically", "[resolv
 
     auto request = Request(root);
     request.hasManifest = true;
-    request.manifest.name = "glob";
+    request.manifest.project.name = "glob";
 
     scb::ManifestTarget target;
     target.name = "glob";
@@ -175,7 +190,7 @@ TEST_CASE("resolver applies build option precedence", "[resolver]")
 
     auto request = Request(root);
     request.hasManifest = true;
-    request.manifest.name = "options";
+    request.manifest.project.name = "options";
     request.profile = "release";
     request.manifest.build.standard = "c++17";
     request.manifest.build.includeDirs = {"include"};
@@ -210,9 +225,9 @@ TEST_CASE("resolver applies build option precedence", "[resolver]")
     REQUIRE(resolved.build.defines.at("MODE") == "target");
     REQUIRE(resolved.build.defines.at("KEEP") == "1");
     REQUIRE(resolved.build.includeDirs.size() == 3);
-    REQUIRE(resolved.build.includeDirs[0] == "include");
-    REQUIRE(resolved.build.includeDirs[1] == "profile_include");
-    REQUIRE(resolved.build.includeDirs[2] == "target_include");
+    REQUIRE(resolved.build.includeDirs[0].path.relative == "include");
+    REQUIRE(resolved.build.includeDirs[1].path.relative == "profile_include");
+    REQUIRE(resolved.build.includeDirs[2].path.relative == "target_include");
 }
 
 TEST_CASE("resolver rejects invalid manifest inputs", "[resolver]")
@@ -224,7 +239,7 @@ TEST_CASE("resolver rejects invalid manifest inputs", "[resolver]")
     {
         auto request = Request(root);
         request.hasManifest = true;
-        request.manifest.name = "bad";
+        request.manifest.project.name = "bad";
 
         scb::ManifestTarget target;
         target.name = "bad";
@@ -241,7 +256,7 @@ TEST_CASE("resolver rejects invalid manifest inputs", "[resolver]")
     {
         auto request = Request(root);
         request.hasManifest = true;
-        request.manifest.name = "bad";
+        request.manifest.project.name = "bad";
 
         scb::ManifestTarget target;
         target.name = "dup";
@@ -258,7 +273,7 @@ TEST_CASE("resolver rejects invalid manifest inputs", "[resolver]")
     {
         auto request = Request(root);
         request.hasManifest = true;
-        request.manifest.name = "bad";
+        request.manifest.project.name = "bad";
 
         scb::ManifestTarget target;
         target.name = "app";
@@ -281,7 +296,7 @@ TEST_CASE("resolver rejects dependency cycles", "[resolver]")
 
     auto request = Request(root);
     request.hasManifest = true;
-    request.manifest.name = "cycle";
+    request.manifest.project.name = "cycle";
 
     scb::ManifestTarget a;
     a.name = "a";
@@ -300,4 +315,103 @@ TEST_CASE("resolver rejects dependency cycles", "[resolver]")
     auto result = scb::ResolveProject(request);
     INFO(Diagnostics(result));
     REQUIRE_FALSE(result.ok());
+}
+
+TEST_CASE("manifest parser loads canonical schema", "[manifest]")
+{
+    const auto root = MakeTempRoot("manifest_parser_loads_canonical_schema");
+    const auto manifestPath = root / "scb.toml";
+
+    std::ofstream manifest(manifestPath);
+    manifest << "[project]\n";
+    manifest << "name = \"fixture\"\n";
+    manifest << "version = \"0.1.0\"\n";
+    manifest << "standard = \"c++23\"\n\n";
+    manifest << "[build]\n";
+    manifest << "include_dirs = [\"include\"]\n";
+    manifest << "defines = { HELLO = 1, ENABLED = true }\n\n";
+    manifest << "[profile.release]\n";
+    manifest << "optimization = \"speed\"\n";
+    manifest << "debug_info = false\n\n";
+    manifest << "[[target]]\n";
+    manifest << "name = \"fixture\"\n";
+    manifest << "kind = \"exe\"\n";
+    manifest << "deps = [\"lib:core\"]\n";
+    manifest << "sources = { include = [\"src/main.cpp\"] }\n";
+    manifest.close();
+
+    scb::ManifestParseRequest request{manifestPath};
+    const auto result = scb::ParseManifestFile(request);
+
+    INFO(Diagnostics(result.diagnostics));
+    REQUIRE(result.ok());
+    REQUIRE(result.projectRoot == root);
+    REQUIRE(result.manifest.project.name == "fixture");
+    REQUIRE(result.manifest.project.version == "0.1.0");
+    REQUIRE(result.manifest.project.standard == "c++23");
+    REQUIRE(result.manifest.build.includeDirs == std::vector<std::string>{"include"});
+    REQUIRE(result.manifest.build.defines.at("HELLO") == "1");
+    REQUIRE(result.manifest.build.defines.at("ENABLED") == "true");
+    REQUIRE(result.manifest.profiles.contains("release"));
+    REQUIRE(result.manifest.targets.size() == 1);
+    REQUIRE(result.manifest.targets.front().dependencies.size() == 1);
+}
+
+TEST_CASE("manifest parser reports schema errors", "[manifest]")
+{
+    const auto root = MakeTempRoot("manifest_parser_reports_schema_errors");
+    const auto manifestPath = root / "scb.toml";
+
+    std::ofstream manifest(manifestPath);
+    manifest << "[project]\n";
+    manifest << "name = 42\n";
+    manifest << "unknown = \"oops\"\n\n";
+    manifest << "[build]\n";
+    manifest << "standard = \"c++20\"\n";
+    manifest.close();
+
+    scb::ManifestParseRequest request{manifestPath};
+    const auto result = scb::ParseManifestFile(request);
+
+    REQUIRE_FALSE(result.ok());
+    REQUIRE_FALSE(result.diagnostics.empty());
+    REQUIRE(result.diagnostics.front().location.has_value());
+}
+
+TEST_CASE("parsed manifest resolves end to end", "[manifest][resolver]")
+{
+    const auto root = MakeTempRoot("parsed_manifest_resolves_end_to_end");
+    WriteFile(root / "src" / "main.cpp");
+    WriteFile(root / "src" / "core.cpp");
+    std::filesystem::create_directories(root / "include");
+
+    const auto manifestPath = root / "scb.toml";
+    std::ofstream manifest(manifestPath);
+    manifest << "[project]\n";
+    manifest << "name = \"parsed\"\n";
+    manifest << "standard = \"c++20\"\n\n";
+    manifest << "[build]\n";
+    manifest << "include_dirs = [\"include\"]\n\n";
+    manifest << "[[target]]\n";
+    manifest << "name = \"parsed\"\n";
+    manifest << "kind = \"exe\"\n";
+    manifest << "sources = { include = [\"src/main.cpp\"] }\n\n";
+    manifest << "[[target]]\n";
+    manifest << "name = \"core\"\n";
+    manifest << "kind = \"static-lib\"\n";
+    manifest << "sources = { include = [\"src/core.cpp\"] }\n";
+    manifest.close();
+
+    const auto parsed = scb::ParseManifestFile({manifestPath});
+    REQUIRE(parsed.ok());
+
+    auto request = Request(root);
+    request.hasManifest = true;
+    request.manifest = parsed.manifest;
+
+    const auto result = scb::ResolveProject(request);
+    INFO(Diagnostics(result));
+    REQUIRE(result.ok());
+    REQUIRE(result.project.name == "parsed");
+    REQUIRE(result.project.targets.size() == 2);
 }

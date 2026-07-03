@@ -2,8 +2,10 @@
 
 #include "scb/core/BuildOptions.hpp"
 #include "scb/core/Manifest.hpp"
+#include "scb/core/Path.hpp"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,13 +24,15 @@ enum class DiagnosticSeverity {
 };
 
 struct Diagnostic {
+    struct Location {
+        std::filesystem::path file;
+        std::size_t line = 0;
+        std::size_t column = 0;
+    };
+
     DiagnosticSeverity severity = DiagnosticSeverity::Error;
     std::string message;
-};
-
-struct ProjectPath {
-    std::filesystem::path absolute;
-    std::string relative;
+    std::optional<Location> location;
 };
 
 struct SourceFile {
@@ -45,8 +49,14 @@ struct TargetId {
     std::string name;
 };
 
+enum class TargetOrigin {
+    Explicit,
+    Inferred
+};
+
 struct ResolvedTarget {
     TargetId id;
+    TargetOrigin origin = TargetOrigin::Explicit;
     SourceSet sources;
     ResolvedBuildOptions build;
     std::vector<TargetId> dependencies;
@@ -61,6 +71,8 @@ struct ResolvedProfile {
 struct ToolchainInfo {
     ToolchainFamily family = ToolchainFamily::Unknown;
     std::string compilerPath;
+    std::string archiverPath;
+    std::string linkerPath;
     std::string version;
 };
 
@@ -93,5 +105,6 @@ struct ResolveResult {
 [[nodiscard]] std::string ToString(CxxStandard standard);
 [[nodiscard]] std::string ToString(OptimizationLevel optimization);
 [[nodiscard]] std::string ToString(ToolchainFamily family);
+[[nodiscard]] std::string ToString(TargetOrigin origin);
 
 } // namespace scb

@@ -41,10 +41,20 @@ struct ManifestProfile {
     ManifestBuildOptions build;
 };
 
-struct ProjectManifest {
+struct ManifestProjectInfo {
     std::string name;
     std::string version;
+    std::string standard;
+};
+
+struct ManifestToolchain {
+    std::string compiler;
+};
+
+struct ProjectManifest {
+    ManifestProjectInfo project;
     ManifestBuildOptions build;
+    ManifestToolchain toolchain;
     std::vector<ManifestTarget> targets;
     std::map<std::string, ManifestProfile> profiles;
 };

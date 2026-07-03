@@ -23,6 +23,21 @@ struct ResolvedPath {
     ProjectPath path;
 };
 
+struct PendingBuildOptions {
+    std::vector<std::string> includeDirs;
+    std::map<std::string, std::string> defines;
+    std::vector<std::string> compileFlags;
+    std::vector<std::string> linkFlags;
+    CxxStandard standard = CxxStandard::Cxx20;
+    OptimizationLevel optimization = OptimizationLevel::Debug;
+    bool debugInfo = true;
+};
+
+struct TargetDeclaration {
+    ManifestTarget manifestTarget;
+    TargetOrigin origin = TargetOrigin::Explicit;
+};
+
 [[nodiscard]] bool IsCompileSource(const std::filesystem::path& path)
 {
     const auto extension = path.extension().string();
@@ -148,7 +163,7 @@ void Deduplicate(std::vector<std::string>& values)
 }
 
 void ApplyBuildOptions(
-    ResolvedBuildOptions& resolved,
+    PendingBuildOptions& resolved,
     const ManifestBuildOptions& manifest,
     std::vector<Diagnostic>& diagnostics,
     std::string_view context)
@@ -184,7 +199,7 @@ void ApplyBuildOptions(
     }
 }
 
-void ApplyTargetOptions(ResolvedBuildOptions& resolved, const ManifestTarget& target, std::vector<Diagnostic>& diagnostics)
+void ApplyTargetOptions(PendingBuildOptions& resolved, const ManifestTarget& target, std::vector<Diagnostic>& diagnostics)
 {
     ManifestBuildOptions options;
     options.includeDirs = target.includeDirs;
@@ -195,23 +210,31 @@ void ApplyTargetOptions(ResolvedBuildOptions& resolved, const ManifestTarget& ta
     ApplyBuildOptions(resolved, options, diagnostics, "target '" + target.name + "'");
 }
 
-[[nodiscard]] ResolvedBuildOptions DefaultBuildOptions(const std::string& profile)
+[[nodiscard]] PendingBuildOptions DefaultBuildOptions(const std::string& profile)
 {
-    ResolvedBuildOptions options;
+    PendingBuildOptions options;
     options.standard = CxxStandard::Cxx20;
     options.optimization = profile == "release" ? OptimizationLevel::Speed : OptimizationLevel::Debug;
     options.debugInfo = profile != "release";
     return options;
 }
 
-void NormalizeIncludeDirs(
+[[nodiscard]] ResolvedBuildOptions NormalizeBuildOptions(
     const std::filesystem::path& root,
-    ResolvedBuildOptions& build,
+    const PendingBuildOptions& pending,
     std::vector<Diagnostic>& diagnostics,
     std::string_view context)
 {
-    std::vector<std::string> resolved;
-    for (const auto& includeDir : build.includeDirs) {
+    ResolvedBuildOptions build;
+    build.defines = pending.defines;
+    build.compileFlags = pending.compileFlags;
+    build.linkFlags = pending.linkFlags;
+    build.standard = pending.standard;
+    build.optimization = pending.optimization;
+    build.debugInfo = pending.debugInfo;
+
+    std::set<std::string> includeSeen;
+    for (const auto& includeDir : pending.includeDirs) {
         auto path = ResolveRootPath(root, includeDir, diagnostics, context);
         if (!path.valid) {
             continue;
@@ -220,12 +243,13 @@ void NormalizeIncludeDirs(
             diagnostics.push_back({DiagnosticSeverity::Error, std::string(context) + " include directory does not exist: " + includeDir});
             continue;
         }
-        resolved.push_back(path.path.relative);
+        if (includeSeen.insert(path.path.relative).second) {
+            build.includeDirs.push_back({path.path});
+        }
     }
-    build.includeDirs = std::move(resolved);
-    Deduplicate(build.includeDirs);
     Deduplicate(build.compileFlags);
     Deduplicate(build.linkFlags);
+    return build;
 }
 
 [[nodiscard]] std::optional<PathPattern> ParsePattern(const std::string& pattern)
@@ -385,12 +409,9 @@ void NormalizeIncludeDirs(
     return false;
 }
 
-void InferTargets(const std::filesystem::path& root, ProjectManifest& manifest)
+[[nodiscard]] std::vector<ManifestTarget> InferTargets(const std::filesystem::path& root, const std::string& projectName)
 {
-    if (!manifest.targets.empty()) {
-        return;
-    }
-
+    std::vector<ManifestTarget> inferred;
     const auto mainCpp = root / "src" / "main.cpp";
     const auto libCpp = root / "src" / "lib.cpp";
     const auto includeDir = root / "include";
@@ -403,7 +424,7 @@ void InferTargets(const std::filesystem::path& root, ProjectManifest& manifest)
 
     if (inferLibrary) {
         if (hasLibCpp) {
-            manifest.targets.push_back(MakeTarget(manifest.name, TargetKind::StaticLibrary, {"src/**/*.cpp"}, {"src/main.cpp"}));
+            inferred.push_back(MakeTarget(projectName, TargetKind::StaticLibrary, {"src/**/*.cpp"}, {"src/main.cpp"}));
         } else {
             std::vector<std::string> headerPatterns;
             for (const auto& extension : {std::string(".h"), std::string(".hh"), std::string(".hpp"), std::string(".hxx")}) {
@@ -412,19 +433,43 @@ void InferTargets(const std::filesystem::path& root, ProjectManifest& manifest)
                 }
             }
 
-            auto target = MakeTarget(manifest.name, TargetKind::HeaderOnly, std::move(headerPatterns));
+            auto target = MakeTarget(projectName, TargetKind::HeaderOnly, std::move(headerPatterns));
             target.includeDirs = {"include"};
-            manifest.targets.push_back(std::move(target));
+            inferred.push_back(std::move(target));
         }
     }
 
     if (inferExecutable) {
-        auto target = MakeTarget(manifest.name, TargetKind::Executable, inferLibrary ? std::vector<std::string>{"src/main.cpp"} : std::vector<std::string>{"src/**/*.cpp"});
+        auto target = MakeTarget(projectName, TargetKind::Executable, inferLibrary ? std::vector<std::string>{"src/main.cpp"} : std::vector<std::string>{"src/**/*.cpp"});
         if (inferLibrary) {
-            target.dependencies.push_back({std::string("lib:") + manifest.name});
+            target.dependencies.push_back({std::string("lib:") + projectName});
         }
-        manifest.targets.push_back(std::move(target));
+        inferred.push_back(std::move(target));
     }
+
+    return inferred;
+}
+
+[[nodiscard]] std::vector<TargetDeclaration> CollectTargetDeclarations(
+    const std::filesystem::path& root,
+    const ProjectManifest& manifest,
+    const std::string& projectName)
+{
+    std::vector<TargetDeclaration> declarations;
+    if (!manifest.targets.empty()) {
+        declarations.reserve(manifest.targets.size());
+        for (const auto& target : manifest.targets) {
+            declarations.push_back({target, TargetOrigin::Explicit});
+        }
+        return declarations;
+    }
+
+    auto inferred = InferTargets(root, projectName);
+    declarations.reserve(inferred.size());
+    for (auto& target : inferred) {
+        declarations.push_back({std::move(target), TargetOrigin::Inferred});
+    }
+    return declarations;
 }
 
 [[nodiscard]] std::string TargetKey(const TargetId& id)
@@ -609,38 +654,49 @@ std::string ToString(ToolchainFamily family)
     return "unknown";
 }
 
+std::string ToString(TargetOrigin origin)
+{
+    switch (origin) {
+    case TargetOrigin::Explicit:
+        return "explicit";
+    case TargetOrigin::Inferred:
+        return "inferred";
+    }
+    return "unknown";
+}
+
 ResolveResult ResolveProject(const ResolveRequest& request)
 {
     ResolveResult result;
     const auto root = LexicalRoot(request.projectRoot);
 
-    ProjectManifest manifest = request.manifest;
-    if (manifest.name.empty()) {
-        manifest.name = root.filename().string();
+    const auto projectName = request.manifest.project.name.empty() ? root.filename().string() : request.manifest.project.name;
+    auto projectBuild = request.manifest.build;
+    if (!request.manifest.project.standard.empty() && projectBuild.standard.empty()) {
+        projectBuild.standard = request.manifest.project.standard;
     }
+    const auto targetDeclarations = CollectTargetDeclarations(root, request.manifest, projectName);
 
-    InferTargets(root, manifest);
-
-    result.project.name = manifest.name;
+    result.project.name = projectName;
     result.project.root = {root, "."};
     result.project.profile.name = request.profile.empty() ? "debug" : request.profile;
     result.project.toolchain = request.toolchain;
 
     auto profileBuild = DefaultBuildOptions(result.project.profile.name);
-    ApplyBuildOptions(profileBuild, manifest.build, result.diagnostics, "project build options");
+    ApplyBuildOptions(profileBuild, projectBuild, result.diagnostics, "project build options");
 
-    auto profile = manifest.profiles.find(result.project.profile.name);
-    if (profile != manifest.profiles.end()) {
+    auto profile = request.manifest.profiles.find(result.project.profile.name);
+    if (profile != request.manifest.profiles.end()) {
         ApplyBuildOptions(profileBuild, profile->second.build, result.diagnostics, "profile '" + result.project.profile.name + "'");
     } else if (result.project.profile.name != "debug" && result.project.profile.name != "release") {
         result.diagnostics.push_back({DiagnosticSeverity::Error, "unknown profile: " + result.project.profile.name});
     }
-    result.project.profile.build = profileBuild;
-    NormalizeIncludeDirs(root, result.project.profile.build, result.diagnostics, "profile '" + result.project.profile.name + "'");
+    result.project.profile.build = NormalizeBuildOptions(root, profileBuild, result.diagnostics, "profile '" + result.project.profile.name + "'");
 
     std::map<std::string, TargetId> byKey;
     std::vector<TargetId> ids;
-    for (const auto& target : manifest.targets) {
+    for (const auto& declaration : targetDeclarations) {
+        const auto& target = declaration.manifestTarget;
         const TargetId id{target.kind, target.name};
         if (!IsValidTargetName(target.name)) {
             result.diagnostics.push_back({DiagnosticSeverity::Error, "invalid target name: " + target.name});
@@ -653,13 +709,15 @@ ResolveResult ResolveProject(const ResolveRequest& request)
         ids.push_back(id);
     }
 
-    for (const auto& target : manifest.targets) {
+    for (const auto& declaration : targetDeclarations) {
+        const auto& target = declaration.manifestTarget;
         ResolvedTarget resolved;
         resolved.id = {target.kind, target.name};
+        resolved.origin = declaration.origin;
         resolved.artifactDirectory = ArtifactDirectory(root, result.project.profile.name, resolved.id);
-        resolved.build = profileBuild;
-        ApplyTargetOptions(resolved.build, target, result.diagnostics);
-        NormalizeIncludeDirs(root, resolved.build, result.diagnostics, "target '" + target.name + "'");
+        auto targetBuild = profileBuild;
+        ApplyTargetOptions(targetBuild, target, result.diagnostics);
+        resolved.build = NormalizeBuildOptions(root, targetBuild, result.diagnostics, "target '" + target.name + "'");
         resolved.sources = ResolveSourceSet(root, target.sources, result.diagnostics, "target '" + target.name + "'");
 
         for (const auto& dependency : target.dependencies) {

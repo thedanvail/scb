@@ -1,0 +1,989 @@
+#include "scb/core/ExecuteBuild.hpp"
+
+#include <toml.hpp>
+
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string_view>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#else
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+namespace scb {
+namespace {
+
+struct ProcessResult {
+    int exitCode = 0;
+    std::string stdoutText;
+    std::string stderrText;
+};
+
+struct DirtyCheckResult {
+    bool dirty = true;
+    std::string reason;
+    std::vector<Diagnostic> diagnostics;
+};
+
+struct ActionStateLoadResult {
+    bool found = false;
+    bool valid = false;
+    ActionState state;
+    std::string reason;
+};
+
+using TomlValue = toml::value;
+using TomlTable = TomlValue::table_type;
+using TomlArray = TomlValue::array_type;
+
+[[nodiscard]] bool HasErrors(const std::vector<Diagnostic>& diagnostics)
+{
+    return std::any_of(diagnostics.begin(), diagnostics.end(), [](const Diagnostic& diagnostic) {
+        return diagnostic.severity == DiagnosticSeverity::Error;
+    });
+}
+
+[[nodiscard]] std::optional<std::filesystem::file_time_type> SafeLastWriteTime(const std::filesystem::path& path)
+{
+    std::error_code error;
+    const auto value = std::filesystem::last_write_time(path, error);
+    if (error) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] std::string DisplayPath(const ProjectPath& path)
+{
+    return path.relative.empty() ? path.absolute.string() : path.relative;
+}
+
+[[nodiscard]] std::string CommandString(const CommandLine& command)
+{
+    std::ostringstream stream;
+    stream << command.program;
+    for (const auto& arg : command.args) {
+        stream << ' ' << arg;
+    }
+    return stream.str();
+}
+
+void EnsureParentDirectory(const std::filesystem::path& path, std::vector<Diagnostic>& diagnostics)
+{
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) {
+        diagnostics.push_back({
+            DiagnosticSeverity::Error,
+            "failed to create directory for output: " + path.parent_path().string(),
+            std::nullopt,
+        });
+    }
+}
+
+[[nodiscard]] std::string StorePath(const std::filesystem::path& root, const std::filesystem::path& path)
+{
+    const auto normalizedRoot = root.lexically_normal();
+    const auto normalizedPath = path.lexically_normal();
+    if (normalizedPath.is_relative()) {
+        return normalizedPath.generic_string();
+    }
+
+    const auto relative = normalizedPath.lexically_relative(normalizedRoot);
+    if (!relative.empty()) {
+        bool escapesRoot = false;
+        for (const auto& part : relative) {
+            if (part == "..") {
+                escapesRoot = true;
+                break;
+            }
+        }
+        if (!escapesRoot) {
+            return relative.generic_string();
+        }
+    }
+    return normalizedPath.generic_string();
+}
+
+[[nodiscard]] std::filesystem::path LoadPath(const std::filesystem::path& root, const std::string& stored)
+{
+    std::filesystem::path path(stored);
+    if (path.is_absolute()) {
+        return path.lexically_normal();
+    }
+    return (root / path).lexically_normal();
+}
+
+[[nodiscard]] TomlArray ToTomlArray(const std::vector<std::string>& values)
+{
+    TomlArray array;
+    array.reserve(values.size());
+    for (const auto& value : values) {
+        array.emplace_back(value);
+    }
+    return array;
+}
+
+[[nodiscard]] std::optional<ActionKind> ActionKindFromString(std::string_view value)
+{
+    if (value == "compile") {
+        return ActionKind::Compile;
+    }
+    if (value == "archive") {
+        return ActionKind::Archive;
+    }
+    if (value == "link") {
+        return ActionKind::Link;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<DepfileFormat> DepfileFormatFromString(std::string_view value)
+{
+    if (value == "none") {
+        return DepfileFormat::None;
+    }
+    if (value == "gnu-make") {
+        return DepfileFormat::GnuMake;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> ReadRequiredString(const TomlTable& table, std::string_view key)
+{
+    const auto it = table.find(std::string(key));
+    if (it == table.end() || !it->second.is_string()) {
+        return std::nullopt;
+    }
+    return it->second.as_string();
+}
+
+[[nodiscard]] std::optional<std::vector<std::string>> ReadRequiredStringArray(const TomlTable& table, std::string_view key)
+{
+    const auto it = table.find(std::string(key));
+    if (it == table.end() || !it->second.is_array()) {
+        return std::nullopt;
+    }
+
+    std::vector<std::string> values;
+    for (const auto& entry : it->second.as_array()) {
+        if (!entry.is_string()) {
+            return std::nullopt;
+        }
+        values.push_back(entry.as_string());
+    }
+    return values;
+}
+
+[[nodiscard]] std::optional<std::string> ReadOptionalString(const TomlTable& table, std::string_view key)
+{
+    const auto it = table.find(std::string(key));
+    if (it == table.end()) {
+        return std::nullopt;
+    }
+    if (!it->second.is_string()) {
+        return std::nullopt;
+    }
+    return it->second.as_string();
+}
+
+ActionStateLoadResult LoadActionState(const BuildPlan& plan, const ActionNode& action)
+{
+    ActionStateLoadResult result;
+    if (!std::filesystem::exists(action.stateFile.absolute)) {
+        result.reason = "action state missing: " + action.stateFile.relative;
+        return result;
+    }
+
+    const auto parsed = toml::try_parse(action.stateFile.absolute, toml::spec::v(1, 0, 0));
+    if (parsed.is_err()) {
+        result.found = true;
+        result.reason = "action state unreadable: " + action.stateFile.relative;
+        return result;
+    }
+
+    const auto& root = parsed.as_ok();
+    if (!root.is_table()) {
+        result.found = true;
+        result.reason = "action state has invalid structure: " + action.stateFile.relative;
+        return result;
+    }
+
+    const auto& table = root.as_table();
+    ActionState state;
+    state.signature.actionId = ReadRequiredString(table, "action_id").value_or("");
+    const auto kind = ReadRequiredString(table, "action_kind");
+    const auto depfileFormat = ReadRequiredString(table, "depfile_format");
+    state.signature.ownerTarget = ReadRequiredString(table, "owner_target").value_or("");
+    state.signature.program = ReadRequiredString(table, "program").value_or("");
+    state.signature.args = ReadRequiredStringArray(table, "args").value_or(std::vector<std::string>{});
+    state.signature.workingDirectory = ReadRequiredString(table, "working_directory").value_or("");
+    state.signature.toolchainFamily = ReadRequiredString(table, "toolchain_family").value_or("");
+    state.signature.toolchainVersion = ReadRequiredString(table, "toolchain_version").value_or("");
+    state.signature.depfilePath = ReadOptionalString(table, "depfile_path");
+    state.signature.explicitInputs = ReadRequiredStringArray(table, "explicit_inputs").value_or(std::vector<std::string>{});
+    state.signature.declaredOutputs = ReadRequiredStringArray(table, "declared_outputs").value_or(std::vector<std::string>{});
+    state.discoveredInputs = ReadRequiredStringArray(table, "discovered_inputs").value_or(std::vector<std::string>{});
+
+    if (state.signature.actionId.empty() || state.signature.ownerTarget.empty() || state.signature.program.empty() ||
+        state.signature.workingDirectory.empty() || state.signature.toolchainFamily.empty() || !kind.has_value() ||
+        !depfileFormat.has_value() || state.signature.explicitInputs.empty() || state.signature.declaredOutputs.empty()) {
+        result.found = true;
+        result.reason = "action state is missing required fields: " + action.stateFile.relative;
+        return result;
+    }
+
+    const auto parsedKind = ActionKindFromString(*kind);
+    const auto parsedFormat = DepfileFormatFromString(*depfileFormat);
+    if (!parsedKind.has_value() || !parsedFormat.has_value()) {
+        result.found = true;
+        result.reason = "action state contains invalid enum values: " + action.stateFile.relative;
+        return result;
+    }
+
+    state.signature.kind = *parsedKind;
+    state.signature.depfileFormat = *parsedFormat;
+
+    result.found = true;
+    result.valid = true;
+    result.state = std::move(state);
+    result.reason = "loaded action state";
+    return result;
+}
+
+void WriteActionState(const ActionNode& action, const ActionState& state, std::vector<Diagnostic>& diagnostics)
+{
+    TomlTable table;
+    table["action_id"] = state.signature.actionId;
+    table["action_kind"] = ToString(state.signature.kind);
+    table["owner_target"] = state.signature.ownerTarget;
+    table["program"] = state.signature.program;
+    table["args"] = ToTomlArray(state.signature.args);
+    table["working_directory"] = state.signature.workingDirectory;
+    table["toolchain_family"] = state.signature.toolchainFamily;
+    table["toolchain_version"] = state.signature.toolchainVersion;
+    table["depfile_format"] = ToString(state.signature.depfileFormat);
+    if (state.signature.depfilePath.has_value()) {
+        table["depfile_path"] = *state.signature.depfilePath;
+    }
+    table["explicit_inputs"] = ToTomlArray(state.signature.explicitInputs);
+    table["declared_outputs"] = ToTomlArray(state.signature.declaredOutputs);
+    table["discovered_inputs"] = ToTomlArray(state.discoveredInputs);
+
+    std::ofstream stream(action.stateFile.absolute);
+    if (!stream) {
+        diagnostics.push_back({
+            DiagnosticSeverity::Warning,
+            "failed to open action state for writing: " + action.stateFile.relative,
+            std::nullopt,
+        });
+        return;
+    }
+
+    stream << toml::format(TomlValue(table));
+    if (!stream) {
+        diagnostics.push_back({
+            DiagnosticSeverity::Warning,
+            "failed to write action state: " + action.stateFile.relative,
+            std::nullopt,
+        });
+    }
+}
+
+[[nodiscard]] std::vector<std::filesystem::path> ParseGnuMakeDepfile(
+    const std::filesystem::path& depfile,
+    const std::filesystem::path& workingDirectory,
+    std::vector<Diagnostic>& diagnostics)
+{
+    std::ifstream stream(depfile);
+    if (!stream) {
+        diagnostics.push_back({
+            DiagnosticSeverity::Warning,
+            "failed to open depfile: " + depfile.string(),
+            std::nullopt,
+        });
+        return {};
+    }
+
+    std::string raw;
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (!raw.empty()) {
+            raw.push_back('\n');
+        }
+        raw += line;
+    }
+
+    if (raw.empty()) {
+        diagnostics.push_back({
+            DiagnosticSeverity::Warning,
+            "depfile is empty: " + depfile.string(),
+            std::nullopt,
+        });
+        return {};
+    }
+
+    std::string flattened;
+    flattened.reserve(raw.size());
+    for (std::size_t index = 0; index < raw.size(); ++index) {
+        const char current = raw[index];
+        if (current == '\\' && index + 1 < raw.size() && raw[index + 1] == '\n') {
+            ++index;
+            continue;
+        }
+        if (current == '\n') {
+            flattened.push_back(' ');
+            continue;
+        }
+        flattened.push_back(current);
+    }
+
+    std::size_t colon = std::string::npos;
+    bool escaped = false;
+    for (std::size_t index = 0; index < flattened.size(); ++index) {
+        const char current = flattened[index];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (current == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (current == ':') {
+            colon = index;
+            break;
+        }
+    }
+
+    if (colon == std::string::npos) {
+        diagnostics.push_back({
+            DiagnosticSeverity::Warning,
+            "depfile is missing target separator: " + depfile.string(),
+            std::nullopt,
+        });
+        return {};
+    }
+
+    std::vector<std::filesystem::path> dependencies;
+    std::string token;
+    escaped = false;
+    for (std::size_t index = colon + 1; index < flattened.size(); ++index) {
+        const char current = flattened[index];
+        if (escaped) {
+            token.push_back(current);
+            escaped = false;
+            continue;
+        }
+        if (current == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (current == ' ' || current == '\t') {
+            if (!token.empty()) {
+                std::filesystem::path path(token);
+                if (path.is_relative()) {
+                    path = (workingDirectory / path).lexically_normal();
+                } else {
+                    path = path.lexically_normal();
+                }
+                dependencies.push_back(std::move(path));
+                token.clear();
+            }
+            continue;
+        }
+        token.push_back(current);
+    }
+    if (!token.empty()) {
+        std::filesystem::path path(token);
+        if (path.is_relative()) {
+            path = (workingDirectory / path).lexically_normal();
+        } else {
+            path = path.lexically_normal();
+        }
+        dependencies.push_back(std::move(path));
+    }
+
+    return dependencies;
+}
+
+struct PreparedActionState {
+    bool ok = true;
+    ActionState state;
+    std::vector<Diagnostic> diagnostics;
+};
+
+[[nodiscard]] PreparedActionState PrepareActionState(const BuildPlan& plan, const ActionNode& action)
+{
+    PreparedActionState prepared;
+    prepared.state.signature = action.signature;
+
+    if (action.depfileFormat != DepfileFormat::GnuMake) {
+        return prepared;
+    }
+    if (!action.depfile.has_value()) {
+        prepared.ok = false;
+        prepared.diagnostics.push_back({
+            DiagnosticSeverity::Error,
+            "action expected a depfile but none was declared: " + action.label,
+            std::nullopt,
+        });
+        return prepared;
+    }
+    if (!std::filesystem::exists(action.depfile->absolute)) {
+        prepared.ok = false;
+        prepared.diagnostics.push_back({
+            DiagnosticSeverity::Error,
+            "compiler did not produce required depfile: " + action.depfile->relative,
+            std::nullopt,
+        });
+        return prepared;
+    }
+
+    auto dependencies = ParseGnuMakeDepfile(
+        action.depfile->absolute,
+        action.command.workingDirectory.value_or(plan.project.root.absolute),
+        prepared.diagnostics);
+    if (dependencies.empty()) {
+        prepared.ok = false;
+        prepared.diagnostics.push_back({
+            DiagnosticSeverity::Error,
+            "compiler produced an unusable depfile: " + action.depfile->relative,
+            std::nullopt,
+        });
+        return prepared;
+    }
+
+    std::set<std::string> seen;
+    for (const auto& dependency : dependencies) {
+        seen.insert(StorePath(plan.project.root.absolute, dependency));
+    }
+    prepared.state.discoveredInputs.assign(seen.begin(), seen.end());
+    return prepared;
+}
+
+[[nodiscard]] std::optional<std::filesystem::file_time_type> OldestOutputTime(const ActionNode& action)
+{
+    std::optional<std::filesystem::file_time_type> oldest;
+    for (const auto& output : action.outputs) {
+        if (!std::filesystem::exists(output.path.absolute)) {
+            return std::nullopt;
+        }
+        const auto writeTime = SafeLastWriteTime(output.path.absolute);
+        if (!writeTime.has_value()) {
+            return std::nullopt;
+        }
+        if (!oldest.has_value() || *writeTime < *oldest) {
+            oldest = *writeTime;
+        }
+    }
+    return oldest;
+}
+
+[[nodiscard]] DirtyCheckResult CheckCompileDirty(const BuildPlan& plan, const ActionNode& action, const std::filesystem::path& workingDirectory, ToolchainFamily family)
+{
+    DirtyCheckResult result;
+    if (family == ToolchainFamily::Msvc) {
+        result.dirty = true;
+        result.reason = "compiler-assisted dependency tracking is unavailable for msvc";
+        return result;
+    }
+
+    if (action.outputs.empty()) {
+        result.dirty = true;
+        result.reason = "action declares no outputs";
+        return result;
+    }
+
+    for (const auto& output : action.outputs) {
+        if (!std::filesystem::exists(output.path.absolute)) {
+            result.dirty = true;
+            result.reason = "output missing: " + DisplayPath(output.path);
+            return result;
+        }
+    }
+
+    const auto state = LoadActionState(plan, action);
+    if (!state.found || !state.valid) {
+        result.dirty = true;
+        result.reason = state.reason;
+        return result;
+    }
+
+    if (state.state.signature != action.signature) {
+        result.dirty = true;
+        result.reason = "action signature changed";
+        return result;
+    }
+
+    const auto outputTime = OldestOutputTime(action);
+    if (!outputTime.has_value()) {
+        result.dirty = true;
+        result.reason = "failed to read output timestamp";
+        return result;
+    }
+
+    for (const auto& input : action.inputs) {
+        if (!std::filesystem::exists(input.path.absolute)) {
+            result.dirty = true;
+            result.reason = "explicit input missing: " + DisplayPath(input.path);
+            return result;
+        }
+
+        const auto inputTime = SafeLastWriteTime(input.path.absolute);
+        if (!inputTime.has_value() || *inputTime > *outputTime) {
+            result.dirty = true;
+            result.reason = "explicit input changed: " + DisplayPath(input.path);
+            return result;
+        }
+    }
+
+    if (state.state.discoveredInputs.empty()) {
+        result.dirty = true;
+        result.reason = "action state recorded no discovered dependencies";
+        return result;
+    }
+
+    for (const auto& storedDependency : state.state.discoveredInputs) {
+        const auto dependency = LoadPath(plan.project.root.absolute, storedDependency);
+        if (!std::filesystem::exists(dependency)) {
+            result.dirty = true;
+            result.reason = "discovered dependency missing: " + storedDependency;
+            return result;
+        }
+        const auto dependencyTime = SafeLastWriteTime(dependency);
+        if (!dependencyTime.has_value() || *dependencyTime > *outputTime) {
+            result.dirty = true;
+            result.reason = "discovered dependency changed: " + storedDependency;
+            return result;
+        }
+    }
+
+    result.dirty = false;
+    result.reason = "up to date";
+    return result;
+}
+
+[[nodiscard]] DirtyCheckResult CheckSimpleDirty(const BuildPlan& plan, const ActionNode& action)
+{
+    DirtyCheckResult result;
+    if (action.outputs.empty()) {
+        result.dirty = true;
+        result.reason = "action declares no outputs";
+        return result;
+    }
+
+    for (const auto& output : action.outputs) {
+        if (!std::filesystem::exists(output.path.absolute)) {
+            result.dirty = true;
+            result.reason = "output missing: " + DisplayPath(output.path);
+            return result;
+        }
+    }
+
+    const auto state = LoadActionState(plan, action);
+    if (!state.found || !state.valid) {
+        result.dirty = true;
+        result.reason = state.reason;
+        return result;
+    }
+
+    if (state.state.signature != action.signature) {
+        result.dirty = true;
+        result.reason = "action signature changed";
+        return result;
+    }
+
+    const auto outputTime = OldestOutputTime(action);
+    if (!outputTime.has_value()) {
+        result.dirty = true;
+        result.reason = "failed to read output timestamp";
+        return result;
+    }
+
+    for (const auto& input : action.inputs) {
+        if (!std::filesystem::exists(input.path.absolute)) {
+            result.dirty = true;
+            result.reason = "explicit input missing: " + DisplayPath(input.path);
+            return result;
+        }
+        const auto inputTime = SafeLastWriteTime(input.path.absolute);
+        if (!inputTime.has_value() || *inputTime > *outputTime) {
+            result.dirty = true;
+            result.reason = "explicit input changed: " + DisplayPath(input.path);
+            return result;
+        }
+    }
+
+    result.dirty = false;
+    result.reason = "up to date";
+    return result;
+}
+
+[[nodiscard]] DirtyCheckResult CheckDirty(const BuildPlan& plan, const ActionNode& action)
+{
+    const auto workingDirectory = action.command.workingDirectory.value_or(plan.project.root.absolute);
+    switch (action.kind) {
+    case ActionKind::Compile:
+        return CheckCompileDirty(plan, action, workingDirectory, plan.project.toolchain.family);
+    case ActionKind::Archive:
+    case ActionKind::Link:
+        return CheckSimpleDirty(plan, action);
+    }
+    return {};
+}
+
+#ifndef _WIN32
+[[nodiscard]] std::string ReadPipe(int descriptor)
+{
+    std::string output;
+    char buffer[4096];
+    while (true) {
+        const auto count = ::read(descriptor, buffer, sizeof(buffer));
+        if (count <= 0) {
+            break;
+        }
+        output.append(buffer, static_cast<std::size_t>(count));
+    }
+    return output;
+}
+
+[[nodiscard]] ProcessResult RunProcess(const CommandLine& command, std::vector<Diagnostic>& diagnostics)
+{
+    ProcessResult result;
+
+    int stdoutPipe[2];
+    int stderrPipe[2];
+    if (::pipe(stdoutPipe) != 0 || ::pipe(stderrPipe) != 0) {
+        diagnostics.push_back({DiagnosticSeverity::Error, "failed to create process pipes", std::nullopt});
+        result.exitCode = 1;
+        return result;
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        diagnostics.push_back({DiagnosticSeverity::Error, "failed to fork process", std::nullopt});
+        result.exitCode = 1;
+        ::close(stdoutPipe[0]);
+        ::close(stdoutPipe[1]);
+        ::close(stderrPipe[0]);
+        ::close(stderrPipe[1]);
+        return result;
+    }
+
+    if (pid == 0) {
+        ::close(stdoutPipe[0]);
+        ::close(stderrPipe[0]);
+
+        ::dup2(stdoutPipe[1], STDOUT_FILENO);
+        ::dup2(stderrPipe[1], STDERR_FILENO);
+
+        ::close(stdoutPipe[1]);
+        ::close(stderrPipe[1]);
+
+        const auto workingDirectory = command.workingDirectory.value_or(std::filesystem::current_path());
+        if (::chdir(workingDirectory.c_str()) != 0) {
+            const auto message = std::string("failed to chdir: ") + std::strerror(errno) + "\n";
+            ::write(STDERR_FILENO, message.data(), message.size());
+            ::_exit(127);
+        }
+
+        std::vector<char*> argv;
+        argv.reserve(command.args.size() + 2);
+        argv.push_back(const_cast<char*>(command.program.c_str()));
+        for (const auto& arg : command.args) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+
+        ::execvp(command.program.c_str(), argv.data());
+
+        const auto message = std::string("failed to exec '") + command.program + "': " + std::strerror(errno) + "\n";
+        ::write(STDERR_FILENO, message.data(), message.size());
+        ::_exit(127);
+    }
+
+    ::close(stdoutPipe[1]);
+    ::close(stderrPipe[1]);
+    result.stdoutText = ReadPipe(stdoutPipe[0]);
+    result.stderrText = ReadPipe(stderrPipe[0]);
+    ::close(stdoutPipe[0]);
+    ::close(stderrPipe[0]);
+
+    int status = 0;
+    if (::waitpid(pid, &status, 0) < 0) {
+        diagnostics.push_back({DiagnosticSeverity::Error, "failed to wait for child process", std::nullopt});
+        result.exitCode = 1;
+        return result;
+    }
+
+    if (WIFEXITED(status)) {
+        result.exitCode = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        result.exitCode = 128 + WTERMSIG(status);
+    } else {
+        result.exitCode = 1;
+    }
+    return result;
+}
+#else
+[[nodiscard]] std::wstring ToWide(const std::string& value)
+{
+    if (value.empty()) {
+        return {};
+    }
+    const auto size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+    std::wstring result(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), size);
+    if (!result.empty() && result.back() == L'\0') {
+        result.pop_back();
+    }
+    return result;
+}
+
+[[nodiscard]] std::wstring QuoteWindowsArgument(const std::string& value)
+{
+    if (value.find_first_of(" \t\"") == std::string::npos) {
+        return ToWide(value);
+    }
+    std::wstring output = L"\"";
+    unsigned backslashes = 0;
+    for (const wchar_t ch : ToWide(value)) {
+        if (ch == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        if (ch == L'"') {
+            output.append(backslashes * 2 + 1, L'\\');
+            output.push_back(L'"');
+            backslashes = 0;
+            continue;
+        }
+        output.append(backslashes, L'\\');
+        backslashes = 0;
+        output.push_back(ch);
+    }
+    output.append(backslashes * 2, L'\\');
+    output.push_back(L'"');
+    return output;
+}
+
+[[nodiscard]] std::string ReadHandle(HANDLE handle)
+{
+    std::string output;
+    char buffer[4096];
+    DWORD bytesRead = 0;
+    while (ReadFile(handle, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead != 0) {
+        output.append(buffer, buffer + bytesRead);
+    }
+    return output;
+}
+
+[[nodiscard]] ProcessResult RunProcess(const CommandLine& command, std::vector<Diagnostic>& diagnostics)
+{
+    ProcessResult result;
+
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE stdoutRead = nullptr;
+    HANDLE stdoutWrite = nullptr;
+    HANDLE stderrRead = nullptr;
+    HANDLE stderrWrite = nullptr;
+    if (!CreatePipe(&stdoutRead, &stdoutWrite, &attributes, 0) ||
+        !CreatePipe(&stderrRead, &stderrWrite, &attributes, 0)) {
+        diagnostics.push_back({DiagnosticSeverity::Error, "failed to create process pipes", std::nullopt});
+        result.exitCode = 1;
+        return result;
+    }
+
+    SetHandleInformation(stdoutRead, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(stderrRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = stdoutWrite;
+    startup.hStdError = stderrWrite;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+    std::wstring commandLine = QuoteWindowsArgument(command.program);
+    for (const auto& arg : command.args) {
+        commandLine.push_back(L' ');
+        commandLine += QuoteWindowsArgument(arg);
+    }
+
+    PROCESS_INFORMATION process{};
+    auto workingDirectory = ToWide(command.workingDirectory.value_or(std::filesystem::current_path()).string());
+
+    if (!CreateProcessW(
+            nullptr,
+            commandLine.data(),
+            nullptr,
+            nullptr,
+            TRUE,
+            0,
+            nullptr,
+            workingDirectory.c_str(),
+            &startup,
+            &process)) {
+        diagnostics.push_back({DiagnosticSeverity::Error, "failed to create process: " + command.program, std::nullopt});
+        result.exitCode = 1;
+        CloseHandle(stdoutRead);
+        CloseHandle(stdoutWrite);
+        CloseHandle(stderrRead);
+        CloseHandle(stderrWrite);
+        return result;
+    }
+
+    CloseHandle(stdoutWrite);
+    CloseHandle(stderrWrite);
+
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    result.exitCode = static_cast<int>(exitCode);
+    result.stdoutText = ReadHandle(stdoutRead);
+    result.stderrText = ReadHandle(stderrRead);
+
+    CloseHandle(stdoutRead);
+    CloseHandle(stderrRead);
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    return result;
+}
+#endif
+
+} // namespace
+
+bool ExecuteBuildResult::ok() const
+{
+    return !HasErrors(diagnostics) && summary.failed == 0;
+}
+
+std::string ToString(ActionStatus status)
+{
+    switch (status) {
+    case ActionStatus::Skipped:
+        return "skipped";
+    case ActionStatus::Executed:
+        return "executed";
+    case ActionStatus::Failed:
+        return "failed";
+    }
+    return "unknown";
+}
+
+ExecuteBuildResult ExecuteBuild(const ExecuteBuildRequest& request)
+{
+    ExecuteBuildResult result;
+    std::map<std::string, std::size_t> indexById;
+    for (std::size_t index = 0; index < request.plan.actions.size(); ++index) {
+        indexById.emplace(request.plan.actions[index].id, index);
+    }
+
+    for (std::size_t index = 0; index < request.plan.actions.size(); ++index) {
+        for (const auto& dependency : request.plan.actions[index].dependencies) {
+            const auto it = indexById.find(dependency);
+            if (it == indexById.end()) {
+                result.diagnostics.push_back({DiagnosticSeverity::Error, "action references unknown dependency: " + dependency, std::nullopt});
+                return result;
+            }
+            if (it->second >= index) {
+                result.diagnostics.push_back({DiagnosticSeverity::Error, "action dependency is not ordered before dependent action: " + dependency, std::nullopt});
+                return result;
+            }
+        }
+    }
+
+    for (const auto& action : request.plan.actions) {
+        ActionExecution execution;
+        execution.actionId = action.id;
+
+        const auto dirty = CheckDirty(request.plan, action);
+        result.diagnostics.insert(result.diagnostics.end(), dirty.diagnostics.begin(), dirty.diagnostics.end());
+        if (!dirty.dirty) {
+            execution.status = ActionStatus::Skipped;
+            execution.reason = dirty.reason;
+            result.summary.skipped += 1;
+            result.summary.actions.push_back(std::move(execution));
+            continue;
+        }
+
+        if (request.dryRun) {
+            execution.status = ActionStatus::Executed;
+            execution.reason = dirty.reason;
+            result.summary.executed += 1;
+            result.summary.actions.push_back(std::move(execution));
+            continue;
+        }
+
+        for (const auto& output : action.outputs) {
+            EnsureParentDirectory(output.path.absolute, result.diagnostics);
+        }
+        if (action.depfile.has_value()) {
+            EnsureParentDirectory(action.depfile->absolute, result.diagnostics);
+        }
+        EnsureParentDirectory(action.stateFile.absolute, result.diagnostics);
+        if (HasErrors(result.diagnostics)) {
+            execution.status = ActionStatus::Failed;
+            execution.exitCode = 1;
+            execution.reason = "failed to prepare output directories";
+            result.summary.failed += 1;
+            result.summary.actions.push_back(std::move(execution));
+            return result;
+        }
+
+        const auto process = RunProcess(action.command, result.diagnostics);
+        execution.stdoutText = process.stdoutText;
+        execution.stderrText = process.stderrText;
+        execution.exitCode = process.exitCode;
+
+        if (process.exitCode != 0) {
+            execution.status = ActionStatus::Failed;
+            execution.reason = dirty.reason;
+            result.summary.failed += 1;
+            result.summary.actions.push_back(std::move(execution));
+            result.diagnostics.push_back({
+                DiagnosticSeverity::Error,
+                "action failed: " + action.label + " (" + CommandString(action.command) + ")",
+                std::nullopt,
+            });
+            return result;
+        }
+
+        const auto preparedState = PrepareActionState(request.plan, action);
+        result.diagnostics.insert(result.diagnostics.end(), preparedState.diagnostics.begin(), preparedState.diagnostics.end());
+        if (!preparedState.ok || HasErrors(result.diagnostics)) {
+            execution.status = ActionStatus::Failed;
+            execution.reason = "failed to capture action state";
+            execution.exitCode = 1;
+            result.summary.failed += 1;
+            result.summary.actions.push_back(std::move(execution));
+            return result;
+        }
+
+        WriteActionState(action, preparedState.state, result.diagnostics);
+        execution.status = ActionStatus::Executed;
+        execution.reason = dirty.reason;
+        result.summary.executed += 1;
+        result.summary.actions.push_back(std::move(execution));
+    }
+
+    return result;
+}
+
+} // namespace scb
