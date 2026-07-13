@@ -1,0 +1,17 @@
+declared_outputs = ["target/release/lib/core/libcore.a"]
+discovered_inputs = []
+explicit_inputs = ["target/release/lib/core/obj/src/core.cpp.o"]
+working_directory = "."
+toolchain_version = "g++"
+args = [
+    "rcs",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/release/manifest_project/target/release/lib/core/libcore.a",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/release/manifest_project/target/release/lib/core/obj/src/core.cpp.o",
+]
+program = "/usr/bin/ar"
+toolchain_family = "gcc"
+owner_target = "lib:core"
+depfile_format = "none"
+action_kind = "archive"
+action_id = "archive:lib:core"
+

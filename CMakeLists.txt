@@ -8,6 +8,20 @@ if(SCB_BUILD_TESTS)
     enable_testing()
 endif()
 
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Vendor/Catch2/CMakeLists.txt")
+    message(FATAL_ERROR
+        "Missing Catch2 submodule at Vendor/Catch2.\n"
+        "Run: git submodule update --init --recursive"
+    )
+endif()
+
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Vendor/toml11/CMakeLists.txt")
+    message(FATAL_ERROR
+        "Missing toml11 submodule at Vendor/toml11.\n"
+        "Run: git submodule update --init --recursive"
+    )
+endif()
+
 set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "" FORCE)
 set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(CATCH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)

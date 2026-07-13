@@ -409,22 +409,53 @@ void ApplyTargetOptions(PendingBuildOptions& resolved, const ManifestTarget& tar
     return false;
 }
 
+[[nodiscard]] bool DirectoryContainsCompileSourceOtherThan(
+    const std::filesystem::path& directory,
+    const std::filesystem::path& excluded)
+{
+    if (!std::filesystem::exists(directory) || !std::filesystem::is_directory(directory)) {
+        return false;
+    }
+
+    const auto normalizedExcluded = excluded.lexically_normal();
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const auto path = entry.path().lexically_normal();
+        if (path != normalizedExcluded && IsCompileSource(path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] std::vector<ManifestTarget> InferTargets(const std::filesystem::path& root, const std::string& projectName)
 {
     std::vector<ManifestTarget> inferred;
+    std::optional<TargetKind> inferredLibraryKind;
     const auto mainCpp = root / "src" / "main.cpp";
     const auto libCpp = root / "src" / "lib.cpp";
+    const auto srcDir = root / "src";
     const auto includeDir = root / "include";
     const bool hasMain = std::filesystem::exists(mainCpp);
     const bool hasLibCpp = std::filesystem::exists(libCpp);
+    const bool hasNonMainCompileSources = DirectoryContainsCompileSourceOtherThan(srcDir, mainCpp);
     const bool hasIncludeDir = std::filesystem::exists(includeDir) && std::filesystem::is_directory(includeDir);
 
-    const bool inferLibrary = hasLibCpp || hasIncludeDir;
+    const bool inferStaticLibrary = hasLibCpp || (hasIncludeDir && hasNonMainCompileSources);
+    const bool inferHeaderOnlyLibrary = hasIncludeDir && !inferStaticLibrary;
+    const bool inferLibrary = inferStaticLibrary || inferHeaderOnlyLibrary;
     const bool inferExecutable = hasMain;
 
     if (inferLibrary) {
-        if (hasLibCpp) {
-            inferred.push_back(MakeTarget(projectName, TargetKind::StaticLibrary, {"src/**/*.cpp"}, {"src/main.cpp"}));
+        if (inferStaticLibrary) {
+            auto target = MakeTarget(projectName, TargetKind::StaticLibrary, {"src/**/*.cpp"}, {"src/main.cpp"});
+            if (hasIncludeDir) {
+                target.includeDirs = {"include"};
+            }
+            inferredLibraryKind = TargetKind::StaticLibrary;
+            inferred.push_back(std::move(target));
         } else {
             std::vector<std::string> headerPatterns;
             for (const auto& extension : {std::string(".h"), std::string(".hh"), std::string(".hpp"), std::string(".hxx")}) {
@@ -435,14 +466,15 @@ void ApplyTargetOptions(PendingBuildOptions& resolved, const ManifestTarget& tar
 
             auto target = MakeTarget(projectName, TargetKind::HeaderOnly, std::move(headerPatterns));
             target.includeDirs = {"include"};
+            inferredLibraryKind = TargetKind::HeaderOnly;
             inferred.push_back(std::move(target));
         }
     }
 
     if (inferExecutable) {
         auto target = MakeTarget(projectName, TargetKind::Executable, inferLibrary ? std::vector<std::string>{"src/main.cpp"} : std::vector<std::string>{"src/**/*.cpp"});
-        if (inferLibrary) {
-            target.dependencies.push_back({std::string("lib:") + projectName});
+        if (inferredLibraryKind.has_value()) {
+            target.dependencies.push_back({ToString(*inferredLibraryKind) + ":" + projectName});
         }
         inferred.push_back(std::move(target));
     }
@@ -676,6 +708,12 @@ ResolveResult ResolveProject(const ResolveRequest& request)
         projectBuild.standard = request.manifest.project.standard;
     }
     const auto targetDeclarations = CollectTargetDeclarations(root, request.manifest, projectName);
+    if (targetDeclarations.empty()) {
+        result.diagnostics.push_back({
+            DiagnosticSeverity::Error,
+            "no build targets found; use zero-config layout with src/main.cpp, src/lib.cpp, or include/, or declare explicit [[target]] entries",
+        });
+    }
 
     result.project.name = projectName;
     result.project.root = {root, "."};
