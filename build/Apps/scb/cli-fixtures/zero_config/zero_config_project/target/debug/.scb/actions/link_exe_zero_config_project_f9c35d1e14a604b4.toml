@@ -1,0 +1,20 @@
+declared_outputs = ["target/debug/exe/zero_config_project/zero_config_project"]
+discovered_inputs = []
+explicit_inputs = ["target/debug/exe/zero_config_project/obj/src/main.cpp.o"]
+working_directory = "."
+toolchain_version = "g++"
+args = [
+    "-std=c++20",
+    "-O0",
+    "-g",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/zero_config/zero_config_project/target/debug/exe/zero_config_project/obj/src/main.cpp.o",
+    "-o",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/zero_config/zero_config_project/target/debug/exe/zero_config_project/zero_config_project",
+]
+program = "/usr/bin/g++"
+toolchain_family = "gcc"
+owner_target = "exe:zero_config_project"
+depfile_format = "none"
+action_kind = "link"
+action_id = "link:exe:zero_config_project"
+

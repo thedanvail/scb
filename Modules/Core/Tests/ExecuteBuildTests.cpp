@@ -136,6 +136,52 @@ TEST_CASE("executor stops after first failing action", "[execute]")
     REQUIRE(result.summary.actions.front().status == scb::ActionStatus::Failed);
 }
 
+#ifndef _WIN32
+TEST_CASE("executor drains large stdout and stderr without deadlock", "[execute]")
+{
+    const auto root = MakeTempRoot("large_output");
+
+    scb::BuildPlan plan;
+    plan.project.root.absolute = root;
+    plan.project.root.relative = ".";
+    plan.project.toolchain.family = scb::ToolchainFamily::Gcc;
+
+    scb::ActionNode action;
+    action.id = "large-output";
+    action.kind = scb::ActionKind::Link;
+    action.label = "Large output";
+    action.outputs.push_back({{root / "out" / "large-output", "out/large-output"}});
+    action.stateFile = {root / "target" / "debug" / ".scb" / "actions" / "large-output.toml", "target/debug/.scb/actions/large-output.toml"};
+    action.command.program = "/bin/sh";
+    action.command.workingDirectory = root;
+    action.command.args = {
+        "-c",
+        "i=0; while [ $i -lt 100000 ]; do printf x; printf y >&2; i=$((i + 1)); done; mkdir -p out; printf done > out/large-output",
+    };
+    action.signature.actionId = action.id;
+    action.signature.kind = action.kind;
+    action.signature.ownerTarget = "exe:large-output";
+    action.signature.program = action.command.program;
+    action.signature.args = action.command.args;
+    action.signature.workingDirectory = root.string();
+    action.signature.toolchainFamily = "gcc";
+    action.signature.toolchainVersion = "test";
+    action.signature.explicitInputs = {"synthetic"};
+    action.signature.declaredOutputs = {"out/large-output"};
+
+    plan.actions = {action};
+
+    const auto result = scb::ExecuteBuild({plan});
+    INFO(Diagnostics(result.diagnostics));
+    REQUIRE(result.ok());
+    REQUIRE(result.summary.executed == 1);
+    REQUIRE(result.summary.actions.size() == 1);
+    REQUIRE(result.summary.actions.front().stdoutText.size() >= 100000);
+    REQUIRE(result.summary.actions.front().stderrText.size() >= 100000);
+    REQUIRE(std::filesystem::exists(root / "out" / "large-output"));
+}
+#endif
+
 TEST_CASE("executor builds and skips zero-config executable", "[execute]")
 {
     const auto root = MakeTempRoot("build_and_skip");

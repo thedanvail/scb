@@ -90,6 +90,7 @@ TEST_CASE("resolver infers library plus executable for zero-config project", "[r
     WriteFile(root / "src" / "main.cpp");
     WriteFile(root / "src" / "lib.cpp");
     WriteFile(root / "src" / "feature.cpp");
+    std::filesystem::create_directories(root / "include");
 
     auto result = scb::ResolveProject(Request(root));
 
@@ -102,12 +103,63 @@ TEST_CASE("resolver infers library plus executable for zero-config project", "[r
     REQUIRE(library.sources.compileSources.size() == 2);
     REQUIRE(library.sources.compileSources[0].path.relative == "src/feature.cpp");
     REQUIRE(library.sources.compileSources[1].path.relative == "src/lib.cpp");
+    REQUIRE(library.build.includeDirs.size() == 1);
+    REQUIRE(library.build.includeDirs.front().path.relative == "include");
 
     const auto& executable = FindTarget(result, scb::TargetKind::Executable, root.filename().string());
     REQUIRE(executable.origin == scb::TargetOrigin::Inferred);
     REQUIRE(executable.dependencies.size() == 1);
     REQUIRE(executable.dependencies.front().kind == scb::TargetKind::StaticLibrary);
     REQUIRE(executable.dependencies.front().name == root.filename().string());
+}
+
+TEST_CASE("resolver infers executable plus header-only dependency for zero-config app with include directory", "[resolver]")
+{
+    const auto root = MakeTempRoot("zero_config_executable_with_headers");
+    WriteFile(root / "src" / "main.cpp");
+    WriteFile(root / "include" / "lib.hpp");
+
+    auto result = scb::ResolveProject(Request(root));
+
+    REQUIRE(result.ok());
+    INFO(Diagnostics(result));
+    REQUIRE(result.project.targets.size() == 2);
+
+    const auto& header = FindTarget(result, scb::TargetKind::HeaderOnly, root.filename().string());
+    REQUIRE(header.origin == scb::TargetOrigin::Inferred);
+    REQUIRE(header.sources.headers.size() == 1);
+    REQUIRE(header.build.includeDirs.size() == 1);
+    REQUIRE(header.build.includeDirs.front().path.relative == "include");
+
+    const auto& executable = FindTarget(result, scb::TargetKind::Executable, root.filename().string());
+    REQUIRE(executable.dependencies.size() == 1);
+    REQUIRE(executable.dependencies.front().kind == scb::TargetKind::HeaderOnly);
+    REQUIRE(executable.dependencies.front().name == root.filename().string());
+}
+
+TEST_CASE("resolver does not drop non-main sources when include directory is present", "[resolver]")
+{
+    const auto root = MakeTempRoot("zero_config_sources_with_include");
+    WriteFile(root / "src" / "main.cpp");
+    WriteFile(root / "src" / "feature.cpp");
+    WriteFile(root / "include" / "feature.hpp");
+
+    auto result = scb::ResolveProject(Request(root));
+
+    REQUIRE(result.ok());
+    INFO(Diagnostics(result));
+    REQUIRE(result.project.targets.size() == 2);
+
+    const auto& library = FindTarget(result, scb::TargetKind::StaticLibrary, root.filename().string());
+    REQUIRE(library.origin == scb::TargetOrigin::Inferred);
+    REQUIRE(library.sources.compileSources.size() == 1);
+    REQUIRE(library.sources.compileSources.front().path.relative == "src/feature.cpp");
+    REQUIRE(library.build.includeDirs.size() == 1);
+    REQUIRE(library.build.includeDirs.front().path.relative == "include");
+
+    const auto& executable = FindTarget(result, scb::TargetKind::Executable, root.filename().string());
+    REQUIRE(executable.dependencies.size() == 1);
+    REQUIRE(executable.dependencies.front().kind == scb::TargetKind::StaticLibrary);
 }
 
 TEST_CASE("resolver infers a header-only library from include directory", "[resolver]")
@@ -125,6 +177,17 @@ TEST_CASE("resolver infers a header-only library from include directory", "[reso
     REQUIRE(target.sources.compileSources.empty());
     REQUIRE(target.build.includeDirs.size() == 1);
     REQUIRE(target.build.includeDirs.front().path.relative == "include");
+}
+
+TEST_CASE("resolver rejects projects with no inferred or explicit targets", "[resolver]")
+{
+    const auto root = MakeTempRoot("empty_project");
+
+    auto result = scb::ResolveProject(Request(root));
+
+    INFO(Diagnostics(result));
+    REQUIRE_FALSE(result.ok());
+    REQUIRE(Diagnostics(result).find("no build targets found") != std::string::npos);
 }
 
 TEST_CASE("explicit manifest targets suppress zero-config discovery", "[resolver]")

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libscb_core.a CMakeFiles/scb_core.dir/Src/BuildPlan.cpp.o CMakeFiles/scb_core.dir/Src/ExecuteBuild.cpp.o CMakeFiles/scb_core.dir/Src/ManifestParser.cpp.o CMakeFiles/scb_core.dir/Src/Resolver.cpp.o CMakeFiles/scb_core.dir/Src/Toolchain.cpp.o
+/usr/bin/ranlib libscb_core.a

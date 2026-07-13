@@ -1,7 +1,10 @@
-.PHONY: build test clean new-module nm
+.PHONY: deps build test clean new-module nm
 
 BUILD_DIR ?= build
-MODULE_NAME := $(or $(NAME),$(filter-out build test clean new-module nm,$(MAKECMDGOALS)))
+MODULE_NAME := $(or $(NAME),$(filter-out deps build test clean new-module nm,$(MAKECMDGOALS)))
+
+deps:
+	git submodule update --init --recursive
 
 build:
 	cmake -S . -B $(BUILD_DIR) -DSCB_BUILD_TESTS=ON

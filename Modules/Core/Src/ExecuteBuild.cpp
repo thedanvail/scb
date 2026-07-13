@@ -12,8 +12,10 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <thread>
 
 #ifndef _WIN32
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -649,18 +651,88 @@ struct PreparedActionState {
 }
 
 #ifndef _WIN32
-[[nodiscard]] std::string ReadPipe(int descriptor)
+void AppendAvailablePipeOutput(int descriptor, std::string& output, bool& open)
 {
-    std::string output;
     char buffer[4096];
     while (true) {
         const auto count = ::read(descriptor, buffer, sizeof(buffer));
-        if (count <= 0) {
+        if (count > 0) {
+            output.append(buffer, static_cast<std::size_t>(count));
+            return;
+        }
+        if (count == 0) {
+            open = false;
+            return;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        open = false;
+        return;
+    }
+}
+
+void ReadPipesConcurrently(int stdoutDescriptor, int stderrDescriptor, ProcessResult& result)
+{
+    bool stdoutOpen = true;
+    bool stderrOpen = true;
+
+    while (stdoutOpen || stderrOpen) {
+        struct pollfd fds[2]{};
+        nfds_t count = 0;
+        if (stdoutOpen) {
+            fds[count].fd = stdoutDescriptor;
+            fds[count].events = POLLIN | POLLHUP | POLLERR;
+            ++count;
+        }
+        if (stderrOpen) {
+            fds[count].fd = stderrDescriptor;
+            fds[count].events = POLLIN | POLLHUP | POLLERR;
+            ++count;
+        }
+
+        const auto ready = ::poll(fds, count, -1);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            stdoutOpen = false;
+            stderrOpen = false;
             break;
         }
-        output.append(buffer, static_cast<std::size_t>(count));
+
+        for (nfds_t index = 0; index < count; ++index) {
+            if (fds[index].revents == 0) {
+                continue;
+            }
+            if (fds[index].fd == stdoutDescriptor) {
+                AppendAvailablePipeOutput(stdoutDescriptor, result.stdoutText, stdoutOpen);
+            } else if (fds[index].fd == stderrDescriptor) {
+                AppendAvailablePipeOutput(stderrDescriptor, result.stderrText, stderrOpen);
+            }
+        }
     }
-    return output;
+}
+
+void ClosePipePair(int pipeDescriptors[2])
+{
+    if (pipeDescriptors[0] >= 0) {
+        ::close(pipeDescriptors[0]);
+    }
+    if (pipeDescriptors[1] >= 0) {
+        ::close(pipeDescriptors[1]);
+    }
+}
+
+[[nodiscard]] bool CreatePipePair(int pipeDescriptors[2], std::vector<Diagnostic>& diagnostics)
+{
+    pipeDescriptors[0] = -1;
+    pipeDescriptors[1] = -1;
+    if (::pipe(pipeDescriptors) != 0) {
+        diagnostics.push_back({DiagnosticSeverity::Error, "failed to create process pipes", std::nullopt});
+        return false;
+    }
+    return true;
 }
 
 [[nodiscard]] ProcessResult RunProcess(const CommandLine& command, std::vector<Diagnostic>& diagnostics)
@@ -669,9 +741,13 @@ struct PreparedActionState {
 
     int stdoutPipe[2];
     int stderrPipe[2];
-    if (::pipe(stdoutPipe) != 0 || ::pipe(stderrPipe) != 0) {
-        diagnostics.push_back({DiagnosticSeverity::Error, "failed to create process pipes", std::nullopt});
+    if (!CreatePipePair(stdoutPipe, diagnostics)) {
         result.exitCode = 1;
+        return result;
+    }
+    if (!CreatePipePair(stderrPipe, diagnostics)) {
+        result.exitCode = 1;
+        ClosePipePair(stdoutPipe);
         return result;
     }
 
@@ -679,10 +755,8 @@ struct PreparedActionState {
     if (pid < 0) {
         diagnostics.push_back({DiagnosticSeverity::Error, "failed to fork process", std::nullopt});
         result.exitCode = 1;
-        ::close(stdoutPipe[0]);
-        ::close(stdoutPipe[1]);
-        ::close(stderrPipe[0]);
-        ::close(stderrPipe[1]);
+        ClosePipePair(stdoutPipe);
+        ClosePipePair(stderrPipe);
         return result;
     }
 
@@ -720,8 +794,7 @@ struct PreparedActionState {
 
     ::close(stdoutPipe[1]);
     ::close(stderrPipe[1]);
-    result.stdoutText = ReadPipe(stdoutPipe[0]);
-    result.stderrText = ReadPipe(stderrPipe[0]);
+    ReadPipesConcurrently(stdoutPipe[0], stderrPipe[0], result);
     ::close(stdoutPipe[0]);
     ::close(stderrPipe[0]);
 
@@ -794,6 +867,13 @@ struct PreparedActionState {
     return output;
 }
 
+void CloseHandleIfValid(HANDLE handle)
+{
+    if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(handle);
+    }
+}
+
 [[nodiscard]] ProcessResult RunProcess(const CommandLine& command, std::vector<Diagnostic>& diagnostics)
 {
     ProcessResult result;
@@ -807,6 +887,10 @@ struct PreparedActionState {
         !CreatePipe(&stderrRead, &stderrWrite, &attributes, 0)) {
         diagnostics.push_back({DiagnosticSeverity::Error, "failed to create process pipes", std::nullopt});
         result.exitCode = 1;
+        CloseHandleIfValid(stdoutRead);
+        CloseHandleIfValid(stdoutWrite);
+        CloseHandleIfValid(stderrRead);
+        CloseHandleIfValid(stderrWrite);
         return result;
     }
 
@@ -852,12 +936,19 @@ struct PreparedActionState {
     CloseHandle(stdoutWrite);
     CloseHandle(stderrWrite);
 
+    std::thread stdoutThread([&result, stdoutRead]() {
+        result.stdoutText = ReadHandle(stdoutRead);
+    });
+    std::thread stderrThread([&result, stderrRead]() {
+        result.stderrText = ReadHandle(stderrRead);
+    });
+
     WaitForSingleObject(process.hProcess, INFINITE);
     DWORD exitCode = 0;
     GetExitCodeProcess(process.hProcess, &exitCode);
     result.exitCode = static_cast<int>(exitCode);
-    result.stdoutText = ReadHandle(stdoutRead);
-    result.stderrText = ReadHandle(stderrRead);
+    stdoutThread.join();
+    stderrThread.join();
 
     CloseHandle(stdoutRead);
     CloseHandle(stderrRead);

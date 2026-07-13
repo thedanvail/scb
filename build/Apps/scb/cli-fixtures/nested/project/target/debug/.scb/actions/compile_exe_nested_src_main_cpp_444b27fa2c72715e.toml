@@ -1,0 +1,27 @@
+declared_outputs = ["target/debug/exe/nested/obj/src/main.cpp.o"]
+discovered_inputs = ["src/main.cpp"]
+explicit_inputs = ["src/main.cpp"]
+depfile_path = "target/debug/exe/nested/obj/src/main.cpp.o.d"
+working_directory = "."
+toolchain_version = "g++"
+args = [
+    "-c",
+    "-std=c++20",
+    "-O0",
+    "-g",
+    "-MMD",
+    "-MF",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/nested/project/target/debug/exe/nested/obj/src/main.cpp.o.d",
+    "-MT",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/nested/project/target/debug/exe/nested/obj/src/main.cpp.o",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/nested/project/src/main.cpp",
+    "-o",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/nested/project/target/debug/exe/nested/obj/src/main.cpp.o",
+]
+program = "/usr/bin/g++"
+toolchain_family = "gcc"
+owner_target = "exe:nested"
+depfile_format = "gnu-make"
+action_kind = "compile"
+action_id = "compile:exe:nested:src/main.cpp"
+

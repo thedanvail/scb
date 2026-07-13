@@ -1,0 +1,22 @@
+[project]
+name = "fixture"
+version = "0.1.0"
+standard = "c++20"
+
+[build]
+include_dirs = ["include"]
+defines = { FEATURE = true }
+
+[profile.release]
+optimization = "speed"
+debug_info = false
+
+[[target]]
+name = "fixture"
+kind = "exe"
+sources = { include = ["src/main.cpp"] }
+
+[[target]]
+name = "core"
+kind = "static-lib"
+sources = { include = ["src/core.cpp"] }

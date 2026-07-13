@@ -1,0 +1,29 @@
+declared_outputs = ["target/debug/lib/core/obj/src/core.cpp.o"]
+discovered_inputs = ["src/core.cpp"]
+explicit_inputs = ["src/core.cpp"]
+depfile_path = "target/debug/lib/core/obj/src/core.cpp.o.d"
+working_directory = "."
+toolchain_version = "g++"
+args = [
+    "-c",
+    "-std=c++20",
+    "-O0",
+    "-g",
+    "-DFEATURE=true",
+    "-I/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/include",
+    "-MMD",
+    "-MF",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/target/debug/lib/core/obj/src/core.cpp.o.d",
+    "-MT",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/target/debug/lib/core/obj/src/core.cpp.o",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/src/core.cpp",
+    "-o",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/target/debug/lib/core/obj/src/core.cpp.o",
+]
+program = "/usr/bin/g++"
+toolchain_family = "gcc"
+owner_target = "lib:core"
+depfile_format = "gnu-make"
+action_kind = "compile"
+action_id = "compile:lib:core:src/core.cpp"
+

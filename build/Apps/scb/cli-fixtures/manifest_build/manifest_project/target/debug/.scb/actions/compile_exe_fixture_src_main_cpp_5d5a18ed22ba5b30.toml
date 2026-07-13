@@ -1,0 +1,29 @@
+declared_outputs = ["target/debug/exe/fixture/obj/src/main.cpp.o"]
+discovered_inputs = ["src/main.cpp"]
+explicit_inputs = ["src/main.cpp"]
+depfile_path = "target/debug/exe/fixture/obj/src/main.cpp.o.d"
+working_directory = "."
+toolchain_version = "g++"
+args = [
+    "-c",
+    "-std=c++20",
+    "-O0",
+    "-g",
+    "-DFEATURE=true",
+    "-I/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/include",
+    "-MMD",
+    "-MF",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/target/debug/exe/fixture/obj/src/main.cpp.o.d",
+    "-MT",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/target/debug/exe/fixture/obj/src/main.cpp.o",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/src/main.cpp",
+    "-o",
+    "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Apps/scb/cli-fixtures/manifest_build/manifest_project/target/debug/exe/fixture/obj/src/main.cpp.o",
+]
+program = "/usr/bin/g++"
+toolchain_family = "gcc"
+owner_target = "exe:fixture"
+depfile_format = "gnu-make"
+action_kind = "compile"
+action_id = "compile:exe:fixture:src/main.cpp"
+

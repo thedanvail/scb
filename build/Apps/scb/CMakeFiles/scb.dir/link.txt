@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/scb.dir/link.d CMakeFiles/scb.dir/Src/main.cpp.o -o scb  ../../Modules/Core/libscb_core.a
