@@ -1,0 +1,7 @@
+[project]
+name = 123
+
+[[target]]
+name = "broken"
+kind = "exe"
+sources = { include = ["src/main.cpp"] }

@@ -60,6 +60,7 @@ scb::ResolveRequest Request(const std::filesystem::path& root)
     request.toolchain.family = scb::ToolchainFamily::Gcc;
     request.toolchain.compilerPath = "g++";
     request.toolchain.version = "test";
+    request.toolchain.identity = "test-toolchain";
     return request;
 }
 

@@ -64,6 +64,8 @@ TEST_CASE("toolchain detection finds a host compiler", "[toolchain]")
     REQUIRE(result.ok());
     REQUIRE(!result.toolchain.compilerPath.empty());
     REQUIRE(result.toolchain.family != scb::ToolchainFamily::Unknown);
+    REQUIRE(!result.toolchain.version.empty());
+    REQUIRE(!result.toolchain.identity.empty());
 }
 
 TEST_CASE("toolchain detection rejects missing compiler override", "[toolchain]")

@@ -476,6 +476,7 @@ void AddStandardFlag(const ResolvedBuildOptions& build, ToolchainFamily family, 
         : PathKey(project.root.absolute, project.root.absolute);
     signature.toolchainFamily = ToString(project.toolchain.family);
     signature.toolchainVersion = project.toolchain.version;
+    signature.toolchainIdentity = project.toolchain.identity;
     signature.depfileFormat = action.depfileFormat;
     if (action.depfile.has_value()) {
         signature.depfilePath = action.depfile->relative;
@@ -611,6 +612,9 @@ std::string ToJson(const BuildPlan& plan)
     stream << ",\n";
     stream << "      \"version\": ";
     WriteJsonString(stream, plan.project.toolchain.version);
+    stream << ",\n";
+    stream << "      \"identity\": ";
+    WriteJsonString(stream, plan.project.toolchain.identity);
     stream << "\n    }\n";
     stream << "  },\n";
     stream << "  \"actions\": [\n";

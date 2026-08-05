@@ -16,6 +16,17 @@ namespace {
 
 constexpr const char* kVersion = "scb 0.1.0";
 
+enum class ManifestLookupStatus {
+    Found,
+    NotFound,
+    Error
+};
+
+struct ManifestLookupResult {
+    ManifestLookupStatus status = ManifestLookupStatus::NotFound;
+    std::optional<std::filesystem::path> manifestPath;
+};
+
 void PrintUsage()
 {
     std::cerr << "usage: scb [--version] [--help] <command> [<args>]\n"
@@ -29,7 +40,7 @@ void PrintUsage()
 
 void PrintBuildUsage()
 {
-    std::cerr << "usage: scb build [--release] [--manifest-path <path>] [--plan[=json|toml]] [--dry-run] [--verbose]\n";
+    std::cerr << "usage: scb build [--release] [--manifest-path <path>] [--plan[=json]] [--dry-run] [--verbose]\n";
 }
 
 void PrintCleanUsage()
@@ -53,7 +64,7 @@ void PrintDiagnostics(const std::vector<scb::Diagnostic>& diagnostics)
     }
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> FindManifestPath(
+[[nodiscard]] ManifestLookupResult FindManifestPath(
     std::optional<std::filesystem::path> manifestPath,
     std::filesystem::path& projectRoot,
     bool& hasManifest,
@@ -68,20 +79,20 @@ void PrintDiagnostics(const std::vector<scb::Diagnostic>& diagnostics)
                 "manifest file does not exist: " + absoluteManifest.string(),
                 scb::Diagnostic::Location{absoluteManifest, 0, 0},
             }});
-            return std::nullopt;
+            return {ManifestLookupStatus::Error, std::nullopt};
         }
 
         const auto parsed = scb::ParseManifestFile({absoluteManifest});
         if (!parsed.ok()) {
             PrintDiagnostics(parsed.diagnostics);
-            return std::nullopt;
+            return {ManifestLookupStatus::Error, std::nullopt};
         }
 
         projectRoot = parsed.projectRoot;
         manifest = parsed.manifest;
         hasManifest = true;
         manifestSummary = absoluteManifest.string();
-        return absoluteManifest;
+        return {ManifestLookupStatus::Found, absoluteManifest};
     }
 
     const auto currentRoot = std::filesystem::current_path().lexically_normal();
@@ -90,20 +101,20 @@ void PrintDiagnostics(const std::vector<scb::Diagnostic>& diagnostics)
         const auto parsed = scb::ParseManifestFile({discoveredManifest});
         if (!parsed.ok()) {
             PrintDiagnostics(parsed.diagnostics);
-            return std::nullopt;
+            return {ManifestLookupStatus::Error, std::nullopt};
         }
 
         projectRoot = parsed.projectRoot;
         manifest = parsed.manifest;
         hasManifest = true;
         manifestSummary = discoveredManifest.string();
-        return discoveredManifest;
+        return {ManifestLookupStatus::Found, discoveredManifest};
     }
 
     projectRoot = currentRoot;
     hasManifest = false;
     manifestSummary = "zero-config";
-    return std::nullopt;
+    return {ManifestLookupStatus::NotFound, std::nullopt};
 }
 
 int BuildCommand(int argc, char** argv)
@@ -166,11 +177,15 @@ int BuildCommand(int argc, char** argv)
     bool hasManifest = false;
     std::string manifestSummary = "zero-config";
 
-    const auto foundManifest = FindManifestPath(std::move(manifestPath), projectRoot, hasManifest, manifest, manifestSummary);
-    if (!foundManifest.has_value() && !hasManifest) {
+    const bool explicitManifestPath = manifestPath.has_value();
+    const auto manifestLookup = FindManifestPath(std::move(manifestPath), projectRoot, hasManifest, manifest, manifestSummary);
+    if (manifestLookup.status == ManifestLookupStatus::Error) {
+        return 1;
+    }
+    if (manifestLookup.status == ManifestLookupStatus::NotFound && !hasManifest) {
         projectRoot = std::filesystem::current_path().lexically_normal();
     }
-    if (!foundManifest.has_value() && manifestPath.has_value()) {
+    if (manifestLookup.status == ManifestLookupStatus::NotFound && explicitManifestPath) {
         return 1;
     }
 
@@ -201,11 +216,8 @@ int BuildCommand(int argc, char** argv)
     }
 
     if (planOnly) {
-        if (planFormat == "json") {
+        if (planFormat.empty() || planFormat == "json") {
             std::cout << scb::ToJson(plan.plan);
-        } else if (planFormat == "toml") {
-            std::cerr << "error: --plan=toml is not implemented yet\n";
-            return 2;
         } else {
             PrintBuildUsage();
             return 2;
@@ -318,8 +330,10 @@ int CleanCommand(int argc, char** argv)
     bool hasManifest = false;
     std::string manifestSummary = "zero-config";
 
-    const auto foundManifest = FindManifestPath(std::move(manifestPath), projectRoot, hasManifest, manifest, manifestSummary);
-    static_cast<void>(foundManifest);
+    const auto manifestLookup = FindManifestPath(std::move(manifestPath), projectRoot, hasManifest, manifest, manifestSummary);
+    if (manifestLookup.status == ManifestLookupStatus::Error) {
+        return 1;
+    }
 
     if (profile.empty() && !allProfiles && hasManifest && !manifest.profiles.empty()) {
         if (manifest.profiles.contains("debug")) {

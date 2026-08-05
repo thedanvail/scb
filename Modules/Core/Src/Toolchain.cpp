@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <sstream>
+#include <system_error>
 #include <string_view>
 #include <vector>
 
@@ -121,6 +124,124 @@ namespace {
     return compilerPath;
 }
 
+[[nodiscard]] std::optional<std::string> RunCommandAndCapture(const std::string& command)
+{
+#ifdef _WIN32
+    FILE* pipe = _popen(command.c_str(), "r");
+#else
+    FILE* pipe = popen(command.c_str(), "r");
+#endif
+    if (pipe == nullptr) {
+        return std::nullopt;
+    }
+
+    std::string output;
+    char buffer[4096];
+    while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr) {
+        output.append(buffer);
+    }
+
+#ifdef _WIN32
+    const int exitCode = _pclose(pipe);
+#else
+    const int exitCode = pclose(pipe);
+#endif
+    if (exitCode != 0 || output.empty()) {
+        return std::nullopt;
+    }
+    return output;
+}
+
+[[nodiscard]] std::string Trim(std::string value)
+{
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ' || value.back() == '\t')) {
+        value.pop_back();
+    }
+    std::size_t start = 0;
+    while (start < value.size() && (value[start] == ' ' || value[start] == '\t')) {
+        ++start;
+    }
+    return value.substr(start);
+}
+
+[[nodiscard]] std::string QuoteShellPath(const std::filesystem::path& path)
+{
+    std::string quoted = "\"";
+    for (const char character : path.string()) {
+        if (character == '"' || character == '\\') {
+            quoted.push_back('\\');
+        }
+        quoted.push_back(character);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+
+[[nodiscard]] std::string FirstNonEmptyLine(const std::string& text)
+{
+    std::stringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        line = Trim(line);
+        if (!line.empty()) {
+            return line;
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] std::string StableHashHex(std::string_view input)
+{
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char character : input) {
+        hash ^= character;
+        hash *= 1099511628211ull;
+    }
+
+    std::ostringstream stream;
+    stream << std::hex << hash;
+    return stream.str();
+}
+
+[[nodiscard]] std::string FallbackIdentityPayload(const std::filesystem::path& compilerPath)
+{
+    std::error_code error;
+    const auto writeTime = std::filesystem::last_write_time(compilerPath, error);
+    std::ostringstream stream;
+    stream << compilerPath.lexically_normal().string();
+    if (!error) {
+        stream << '\n' << writeTime.time_since_epoch().count();
+    }
+    return stream.str();
+}
+
+void PopulateToolchainIdentity(ToolchainInfo& toolchain)
+{
+    const std::filesystem::path compilerPath(toolchain.compilerPath);
+    const auto quotedPath = QuoteShellPath(compilerPath);
+
+    std::optional<std::string> probeOutput;
+    if (toolchain.family == ToolchainFamily::Msvc) {
+        probeOutput = RunCommandAndCapture(quotedPath + " /Bv 2>&1");
+        if (!probeOutput.has_value()) {
+            probeOutput = RunCommandAndCapture(quotedPath + " /? 2>&1");
+        }
+    } else {
+        probeOutput = RunCommandAndCapture(quotedPath + " --version 2>&1");
+    }
+
+    if (probeOutput.has_value()) {
+        toolchain.version = FirstNonEmptyLine(*probeOutput);
+        toolchain.identity = StableHashHex(compilerPath.lexically_normal().string() + "\n" + *probeOutput);
+        return;
+    }
+
+    if (toolchain.version.empty()) {
+        toolchain.version = compilerPath.filename().string();
+    }
+    toolchain.identity = StableHashHex(FallbackIdentityPayload(compilerPath));
+}
+
 } // namespace
 
 bool DetectToolchainResult::ok() const
@@ -166,8 +287,6 @@ DetectToolchainResult DetectHostToolchain(const DetectToolchainRequest& request)
 
     result.toolchain.compilerPath = compilerPath->string();
     result.toolchain.family = InferFamily(*compilerPath);
-    result.toolchain.version = compilerPath->filename().string();
-
     if (result.toolchain.family == ToolchainFamily::Unknown) {
         result.diagnostics.push_back({
             DiagnosticSeverity::Error,
@@ -183,6 +302,7 @@ DetectToolchainResult DetectHostToolchain(const DetectToolchainRequest& request)
     if (auto linker = DetectLinker(result.toolchain.family, *compilerPath)) {
         result.toolchain.linkerPath = linker->string();
     }
+    PopulateToolchainIdentity(result.toolchain);
 
     return result;
 }

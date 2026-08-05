@@ -59,3 +59,9 @@ sources.include = ["src/**/*.cpp"]
 sources.exclude = ["src/main.cpp"]
 include_dirs = ["include"]
 ```
+
+Current repo-health matrix:
+ - `make deps`
+ - `make test`
+ - `make health`
+ - `cmake -S . -B build-no-tests -DSCB_BUILD_TESTS=OFF`
