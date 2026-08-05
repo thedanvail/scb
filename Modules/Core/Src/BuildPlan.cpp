@@ -722,6 +722,10 @@ PlanBuildResult PlanBuild(const PlanBuildRequest& request)
         result.diagnostics.push_back({DiagnosticSeverity::Error, "toolchain detection is required before planning", std::nullopt});
         return result;
     }
+    if (request.project.toolchain.identity.empty()) {
+        result.diagnostics.push_back({DiagnosticSeverity::Error, "toolchain identity is required before planning", std::nullopt});
+        return result;
+    }
 
     std::map<std::string, const ResolvedTarget*> targetsByKey;
     for (const auto& target : request.project.targets) {
