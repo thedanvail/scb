@@ -19,13 +19,17 @@ define ensure_build_dir
 			exit 2; \
 		}; \
 	else \
-		parent=$$(dirname -- "$$dir"); \
-		base=$$(basename -- "$$dir"); \
-		parent_abs=$$(cd "$$parent" 2>/dev/null && pwd -P) || { \
-			echo "refusing to use build directory with missing parent: $$dir"; \
+		ancestor="$$dir"; \
+		prefix=""; \
+		while [ ! -d "$$ancestor" ] && [ "$$ancestor" != "." ] && [ "$$ancestor" != "/" ]; do \
+			prefix="/$$(basename -- "$$ancestor")$$prefix"; \
+			ancestor=$$(dirname -- "$$ancestor"); \
+		done; \
+		ancestor_abs=$$(cd "$$ancestor" 2>/dev/null && pwd -P) || { \
+			echo "refusing to use build directory with no existing ancestor: $$dir"; \
 			exit 2; \
 		}; \
-		dir_abs="$$parent_abs/$$base"; \
+		dir_abs="$$ancestor_abs$$prefix"; \
 	fi; \
 	if [ "$$dir_abs" = "$$current_root" ] || [ "$$dir_abs" = "$$source_parent" ] || [ "$$dir_abs" = "/" ]; then \
 		echo "refusing dangerous build directory: $$dir"; \

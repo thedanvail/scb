@@ -1,5 +1,0 @@
-if(EXISTS "/home/deck/.t3/worktrees/scb/t3code-59472579/build/Modules/Core/scb_core_tests-b12d07c_tests.cmake")
-  include("/home/deck/.t3/worktrees/scb/t3code-59472579/build/Modules/Core/scb_core_tests-b12d07c_tests.cmake")
-else()
-  add_test(scb_core_tests_NOT_BUILT-b12d07c scb_core_tests_NOT_BUILT-b12d07c)
-endif()
