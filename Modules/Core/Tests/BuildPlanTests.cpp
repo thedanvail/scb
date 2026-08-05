@@ -64,6 +64,8 @@ TEST_CASE("toolchain detection finds a host compiler", "[toolchain]")
     REQUIRE(result.ok());
     REQUIRE(!result.toolchain.compilerPath.empty());
     REQUIRE(result.toolchain.family != scb::ToolchainFamily::Unknown);
+    REQUIRE(!result.toolchain.version.empty());
+    REQUIRE(!result.toolchain.identity.empty());
 }
 
 TEST_CASE("toolchain detection rejects missing compiler override", "[toolchain]")
@@ -72,6 +74,22 @@ TEST_CASE("toolchain detection rejects missing compiler override", "[toolchain]"
     const auto result = scb::DetectHostToolchain({root, std::string("toolchains/does-not-exist++")});
 
     REQUIRE_FALSE(result.ok());
+}
+
+TEST_CASE("planner rejects toolchains without an identity", "[plan]")
+{
+    scb::ResolvedProject project;
+    project.root.absolute = MakeTempRoot("missing_toolchain_identity");
+    project.root.relative = ".";
+    project.toolchain.family = scb::ToolchainFamily::Gcc;
+    project.toolchain.compilerPath = "g++";
+    project.toolchain.version = "test";
+
+    const auto plan = scb::PlanBuild({project});
+
+    REQUIRE_FALSE(plan.ok());
+    REQUIRE(Diagnostics(plan.diagnostics).find("toolchain identity is required before planning") != std::string::npos);
+    REQUIRE(plan.plan.actions.empty());
 }
 
 TEST_CASE("planner builds compile and link actions for executable", "[plan]")
@@ -279,6 +297,8 @@ TEST_CASE("planner emits source-dependencies for msvc compiles", "[plan]")
 
     request.toolchain.family = scb::ToolchainFamily::Msvc;
     request.toolchain.compilerPath = "cl.exe";
+    request.toolchain.version = "test";
+    request.toolchain.identity = "test-toolchain";
 
     const auto resolved = scb::ResolveProject(request);
     REQUIRE(resolved.ok());

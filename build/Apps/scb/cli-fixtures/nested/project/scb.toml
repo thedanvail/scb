@@ -1,8 +1,0 @@
-[project]
-name = "nested"
-standard = "c++20"
-
-[[target]]
-name = "nested"
-kind = "exe"
-sources = { include = ["src/main.cpp"] }

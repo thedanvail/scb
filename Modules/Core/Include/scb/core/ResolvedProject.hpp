@@ -74,6 +74,7 @@ struct ToolchainInfo {
     std::string archiverPath;
     std::string linkerPath;
     std::string version;
+    std::string identity;
 };
 
 struct ResolvedProject {

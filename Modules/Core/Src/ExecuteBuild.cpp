@@ -238,14 +238,16 @@ ActionStateLoadResult LoadActionState(const BuildPlan& plan, const ActionNode& a
     state.signature.workingDirectory = ReadRequiredString(table, "working_directory").value_or("");
     state.signature.toolchainFamily = ReadRequiredString(table, "toolchain_family").value_or("");
     state.signature.toolchainVersion = ReadRequiredString(table, "toolchain_version").value_or("");
+    state.signature.toolchainIdentity = ReadRequiredString(table, "toolchain_identity").value_or("");
     state.signature.depfilePath = ReadOptionalString(table, "depfile_path");
     state.signature.explicitInputs = ReadRequiredStringArray(table, "explicit_inputs").value_or(std::vector<std::string>{});
     state.signature.declaredOutputs = ReadRequiredStringArray(table, "declared_outputs").value_or(std::vector<std::string>{});
     state.discoveredInputs = ReadRequiredStringArray(table, "discovered_inputs").value_or(std::vector<std::string>{});
 
     if (state.signature.actionId.empty() || state.signature.ownerTarget.empty() || state.signature.program.empty() ||
-        state.signature.workingDirectory.empty() || state.signature.toolchainFamily.empty() || !kind.has_value() ||
-        !depfileFormat.has_value() || state.signature.explicitInputs.empty() || state.signature.declaredOutputs.empty()) {
+        state.signature.workingDirectory.empty() || state.signature.toolchainFamily.empty() ||
+        state.signature.toolchainIdentity.empty() || !kind.has_value() || !depfileFormat.has_value() ||
+        state.signature.explicitInputs.empty() || state.signature.declaredOutputs.empty()) {
         result.found = true;
         result.reason = "action state is missing required fields: " + action.stateFile.relative;
         return result;
@@ -280,6 +282,7 @@ void WriteActionState(const ActionNode& action, const ActionState& state, std::v
     table["working_directory"] = state.signature.workingDirectory;
     table["toolchain_family"] = state.signature.toolchainFamily;
     table["toolchain_version"] = state.signature.toolchainVersion;
+    table["toolchain_identity"] = state.signature.toolchainIdentity;
     table["depfile_format"] = ToString(state.signature.depfileFormat);
     if (state.signature.depfilePath.has_value()) {
         table["depfile_path"] = *state.signature.depfilePath;

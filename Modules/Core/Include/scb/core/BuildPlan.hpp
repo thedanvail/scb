@@ -35,6 +35,7 @@ struct ActionSignature {
     std::string workingDirectory;
     std::string toolchainFamily;
     std::string toolchainVersion;
+    std::string toolchainIdentity;
     DepfileFormat depfileFormat = DepfileFormat::None;
     std::optional<std::string> depfilePath;
     std::vector<std::string> explicitInputs;

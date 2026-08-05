@@ -166,6 +166,7 @@ TEST_CASE("executor drains large stdout and stderr without deadlock", "[execute]
     action.signature.workingDirectory = root.string();
     action.signature.toolchainFamily = "gcc";
     action.signature.toolchainVersion = "test";
+    action.signature.toolchainIdentity = "test-identity";
     action.signature.explicitInputs = {"synthetic"};
     action.signature.declaredOutputs = {"out/large-output"};
 
@@ -332,6 +333,38 @@ TEST_CASE("signature changes rebuild executable without source edits", "[execute
     REQUIRE(firstBuild.summary.executed == 2);
 
     request.manifest.targets.front().defines = {{"VALUE", "7"}};
+
+    const auto secondResolved = scb::ResolveProject(request);
+    REQUIRE(secondResolved.ok());
+    const auto secondPlan = scb::PlanBuild({secondResolved.project});
+    REQUIRE(secondPlan.ok());
+    const auto secondBuild = scb::ExecuteBuild({secondPlan.plan});
+    INFO(Diagnostics(secondBuild.diagnostics));
+    REQUIRE(secondBuild.ok());
+    REQUIRE(secondBuild.summary.executed == 2);
+    REQUIRE(secondBuild.summary.skipped == 0);
+    REQUIRE(HasExecutionReason(secondBuild, "action signature changed"));
+}
+
+TEST_CASE("toolchain identity changes rebuild executable without source edits", "[execute]")
+{
+    const auto root = MakeTempRoot("toolchain_identity_rebuild");
+    WriteFile(root / "src" / "main.cpp", "int main() { return 0; }\n");
+
+    auto toolchain = RequireToolchain(root);
+
+    auto request = Request(root, toolchain);
+    const auto firstResolved = scb::ResolveProject(request);
+    REQUIRE(firstResolved.ok());
+    const auto firstPlan = scb::PlanBuild({firstResolved.project});
+    REQUIRE(firstPlan.ok());
+    const auto firstBuild = scb::ExecuteBuild({firstPlan.plan});
+    INFO(Diagnostics(firstBuild.diagnostics));
+    REQUIRE(firstBuild.ok());
+    REQUIRE(firstBuild.summary.executed == 2);
+
+    toolchain.identity += "-changed";
+    request.toolchain = toolchain;
 
     const auto secondResolved = scb::ResolveProject(request);
     REQUIRE(secondResolved.ok());

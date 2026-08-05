@@ -137,6 +137,43 @@ if(SCB_BUILD_TESTS)
     )
 
     add_test(
+        NAME scb_cli_clean_missing_manifest_path
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_WORKING_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}
+            -DSCB_EXPECT_REGEX=manifest.file.does.not.exist
+            -DSCB_ARG1=clean
+            -DSCB_ARG2=--manifest-path
+            -DSCB_ARG3=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/does_not_exist.toml
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ExpectFailure.cmake"
+    )
+    set_tests_properties(scb_cli_clean_missing_manifest_path PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    add_test(
+        NAME scb_cli_clean_invalid_manifest
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_WORKING_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/invalid_manifest
+            -DSCB_EXPECT_REGEX=project.name.must.be.a.string
+            -DSCB_ARG1=clean
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ExpectFailure.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_clean_missing_manifest
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_WORKING_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/invalid_manifest
+            -DSCB_EXPECT_REGEX=manifest.file.does.not.exist
+            -DSCB_ARG1=clean
+            -DSCB_ARG2=--manifest-path
+            -DSCB_ARG3=missing.toml
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ExpectFailure.cmake"
+    )
+
+    add_test(
         NAME scb_cli_clean_default_profile
         COMMAND "${CMAKE_COMMAND}"
             -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
