@@ -1,4 +1,5 @@
 #include "scb/core/BuildPlan.hpp"
+#include "scb/core/CleanProject.hpp"
 #include "scb/core/ExecuteBuild.hpp"
 #include "scb/core/ManifestParser.hpp"
 #include "scb/core/ResolvedProject.hpp"
@@ -13,9 +14,27 @@
 
 namespace {
 
+constexpr const char* kVersion = "scb 0.1.0";
+
 void PrintUsage()
 {
-    std::cerr << "usage: scb build [--release] [--manifest-path <path>] [--dry-run] [--verbose]\n";
+    std::cerr << "usage: scb [--version] [--help] <command> [<args>]\n"
+              << "\n"
+              << "Commands:\n"
+              << "  build     Compile the project\n"
+              << "  clean     Remove build artifacts\n"
+              << "\n"
+              << "Run `scb <command> --help` for command-specific usage.\n";
+}
+
+void PrintBuildUsage()
+{
+    std::cerr << "usage: scb build [--release] [--manifest-path <path>] [--plan[=json|toml]] [--dry-run] [--verbose]\n";
+}
+
+void PrintCleanUsage()
+{
+    std::cerr << "usage: scb clean [--all] [--profile <name>] [--manifest-path <path>]\n";
 }
 
 void PrintCommand(std::ostream& stream, const scb::CommandLine& command)
@@ -34,17 +53,67 @@ void PrintDiagnostics(const std::vector<scb::Diagnostic>& diagnostics)
     }
 }
 
+[[nodiscard]] std::optional<std::filesystem::path> FindManifestPath(
+    std::optional<std::filesystem::path> manifestPath,
+    std::filesystem::path& projectRoot,
+    bool& hasManifest,
+    scb::ProjectManifest& manifest,
+    std::string& manifestSummary)
+{
+    if (manifestPath.has_value()) {
+        const auto absoluteManifest = std::filesystem::absolute(*manifestPath).lexically_normal();
+        if (!std::filesystem::exists(absoluteManifest)) {
+            PrintDiagnostics({{
+                scb::DiagnosticSeverity::Error,
+                "manifest file does not exist: " + absoluteManifest.string(),
+                scb::Diagnostic::Location{absoluteManifest, 0, 0},
+            }});
+            return std::nullopt;
+        }
+
+        const auto parsed = scb::ParseManifestFile({absoluteManifest});
+        if (!parsed.ok()) {
+            PrintDiagnostics(parsed.diagnostics);
+            return std::nullopt;
+        }
+
+        projectRoot = parsed.projectRoot;
+        manifest = parsed.manifest;
+        hasManifest = true;
+        manifestSummary = absoluteManifest.string();
+        return absoluteManifest;
+    }
+
+    const auto currentRoot = std::filesystem::current_path().lexically_normal();
+    const auto discoveredManifest = currentRoot / "scb.toml";
+    if (std::filesystem::exists(discoveredManifest)) {
+        const auto parsed = scb::ParseManifestFile({discoveredManifest});
+        if (!parsed.ok()) {
+            PrintDiagnostics(parsed.diagnostics);
+            return std::nullopt;
+        }
+
+        projectRoot = parsed.projectRoot;
+        manifest = parsed.manifest;
+        hasManifest = true;
+        manifestSummary = discoveredManifest.string();
+        return discoveredManifest;
+    }
+
+    projectRoot = currentRoot;
+    hasManifest = false;
+    manifestSummary = "zero-config";
+    return std::nullopt;
+}
+
 int BuildCommand(int argc, char** argv)
 {
     std::optional<std::filesystem::path> manifestPath;
     bool release = false;
     bool dryRun = false;
     bool verbose = false;
-    std::optional<std::string> compilerOverride;
-    std::filesystem::path projectRoot;
-    scb::ProjectManifest manifest;
-    bool hasManifest = false;
-    std::string manifestSummary = "zero-config";
+    bool planOnly = false;
+    std::string planFormat = "json";
 
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument(argv[index]);
@@ -65,62 +134,47 @@ int BuildCommand(int argc, char** argv)
             verbose = true;
             continue;
         }
+        if (argument == "--plan") {
+            planOnly = true;
+            planFormat = "json";
+            continue;
+        }
+        if (argument.starts_with("--plan=")) {
+            planOnly = true;
+            planFormat = argument.substr(7);
+            continue;
+        }
         if (argument == "--manifest-path") {
             if (index + 1 >= argc) {
-                PrintUsage();
+                PrintBuildUsage();
                 return 2;
             }
             manifestPath = std::filesystem::path(argv[++index]);
             continue;
         }
+        if (argument == "--help") {
+            PrintBuildUsage();
+            return 0;
+        }
 
-        PrintUsage();
+        PrintBuildUsage();
         return 2;
     }
 
-    if (manifestPath.has_value()) {
-        const auto absoluteManifest = std::filesystem::absolute(*manifestPath).lexically_normal();
-        if (!std::filesystem::exists(absoluteManifest)) {
-            PrintDiagnostics({{
-                scb::DiagnosticSeverity::Error,
-                "manifest file does not exist: " + absoluteManifest.string(),
-                scb::Diagnostic::Location{absoluteManifest, 0, 0},
-            }});
-            return 1;
-        }
+    std::filesystem::path projectRoot;
+    scb::ProjectManifest manifest;
+    bool hasManifest = false;
+    std::string manifestSummary = "zero-config";
 
-        const auto parsed = scb::ParseManifestFile({absoluteManifest});
-        if (!parsed.ok()) {
-            PrintDiagnostics(parsed.diagnostics);
-            return 1;
-        }
-
-        projectRoot = parsed.projectRoot;
-        manifest = parsed.manifest;
-        hasManifest = true;
-        compilerOverride = scb::GetCompilerOverride(manifest);
-        manifestSummary = absoluteManifest.string();
-    } else {
-        const auto currentRoot = std::filesystem::current_path().lexically_normal();
-        const auto discoveredManifest = currentRoot / "scb.toml";
-        if (std::filesystem::exists(discoveredManifest)) {
-            const auto parsed = scb::ParseManifestFile({discoveredManifest});
-            if (!parsed.ok()) {
-                PrintDiagnostics(parsed.diagnostics);
-                return 1;
-            }
-
-            projectRoot = parsed.projectRoot;
-            manifest = parsed.manifest;
-            hasManifest = true;
-            compilerOverride = scb::GetCompilerOverride(manifest);
-            manifestSummary = discoveredManifest.string();
-        } else {
-            projectRoot = currentRoot;
-            hasManifest = false;
-        }
+    const auto foundManifest = FindManifestPath(std::move(manifestPath), projectRoot, hasManifest, manifest, manifestSummary);
+    if (!foundManifest.has_value() && !hasManifest) {
+        projectRoot = std::filesystem::current_path().lexically_normal();
+    }
+    if (!foundManifest.has_value() && manifestPath.has_value()) {
+        return 1;
     }
 
+    const auto compilerOverride = hasManifest ? scb::GetCompilerOverride(manifest) : std::nullopt;
     const auto detectedToolchain = scb::DetectHostToolchain({projectRoot, compilerOverride});
     if (!detectedToolchain.ok()) {
         PrintDiagnostics(detectedToolchain.diagnostics);
@@ -144,6 +198,19 @@ int BuildCommand(int argc, char** argv)
     if (!plan.ok()) {
         PrintDiagnostics(plan.diagnostics);
         return 1;
+    }
+
+    if (planOnly) {
+        if (planFormat == "json") {
+            std::cout << scb::ToJson(plan.plan);
+        } else if (planFormat == "toml") {
+            std::cerr << "error: --plan=toml is not implemented yet\n";
+            return 2;
+        } else {
+            PrintBuildUsage();
+            return 2;
+        }
+        return 0;
     }
 
     const auto execution = scb::ExecuteBuild({plan.plan, dryRun, verbose});
@@ -209,6 +276,84 @@ int BuildCommand(int argc, char** argv)
     return 0;
 }
 
+int CleanCommand(int argc, char** argv)
+{
+    std::optional<std::filesystem::path> manifestPath;
+    std::string profile;
+    bool allProfiles = false;
+
+    for (int index = 2; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument == "--all") {
+            allProfiles = true;
+            continue;
+        }
+        if (argument == "--profile") {
+            if (index + 1 >= argc) {
+                PrintCleanUsage();
+                return 2;
+            }
+            profile = argv[++index];
+            continue;
+        }
+        if (argument == "--manifest-path") {
+            if (index + 1 >= argc) {
+                PrintCleanUsage();
+                return 2;
+            }
+            manifestPath = std::filesystem::path(argv[++index]);
+            continue;
+        }
+        if (argument == "--help") {
+            PrintCleanUsage();
+            return 0;
+        }
+
+        PrintCleanUsage();
+        return 2;
+    }
+
+    std::filesystem::path projectRoot;
+    scb::ProjectManifest manifest;
+    bool hasManifest = false;
+    std::string manifestSummary = "zero-config";
+
+    const auto foundManifest = FindManifestPath(std::move(manifestPath), projectRoot, hasManifest, manifest, manifestSummary);
+    static_cast<void>(foundManifest);
+
+    if (profile.empty() && !allProfiles && hasManifest && !manifest.profiles.empty()) {
+        if (manifest.profiles.contains("debug")) {
+            profile = "debug";
+        } else {
+            profile = manifest.profiles.begin()->first;
+        }
+    }
+
+    if (profile.empty() && !allProfiles) {
+        profile = "debug";
+    }
+
+    scb::CleanRequest request;
+    request.projectRoot = projectRoot;
+    request.profile = profile;
+    request.allProfiles = allProfiles;
+
+    const auto result = scb::CleanProject(request);
+    if (!result.ok()) {
+        PrintDiagnostics(result.diagnostics);
+        return 1;
+    }
+
+    if (allProfiles) {
+        std::cout << "Cleaned target/\n";
+    } else if (!result.removedDirectories.empty()) {
+        std::cout << "Cleaned " << result.removedDirectories.front().lexically_relative(projectRoot).string() << '\n';
+    } else {
+        std::cout << "Nothing to clean\n";
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -218,10 +363,27 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    if (std::string_view(argv[1]) == "build") {
+    const std::string_view command(argv[1]);
+
+    if (command == "--version" || command == "-V" || command == "--v") {
+        std::cout << kVersion << '\n';
+        return 0;
+    }
+
+    if (command == "--help" || command == "-h") {
+        PrintUsage();
+        return 0;
+    }
+
+    if (command == "build") {
         return BuildCommand(argc, argv);
     }
 
+    if (command == "clean") {
+        return CleanCommand(argc, argv);
+    }
+
+    std::cerr << "unknown command: " << command << "\n\n";
     PrintUsage();
     return 2;
 }

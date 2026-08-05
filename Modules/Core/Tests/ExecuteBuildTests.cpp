@@ -197,9 +197,7 @@ TEST_CASE("executor builds and skips zero-config executable", "[execute]")
     REQUIRE(firstBuild.ok());
     REQUIRE(firstBuild.summary.executed == 2);
 
-    if (toolchain.family == scb::ToolchainFamily::Msvc) {
-        SKIP("MSVC is conservative in this milestone and always recompiles.");
-    }
+    
 
     const auto secondResolved = scb::ResolveProject(Request(root, toolchain));
     REQUIRE(secondResolved.ok());
@@ -219,9 +217,7 @@ TEST_CASE("header changes rebuild affected executable", "[execute]")
     WriteFile(root / "src" / "main.cpp", "#include \"value.hpp\"\nint main() { return value(); }\n");
 
     const auto toolchain = RequireToolchain(root);
-    if (toolchain.family == scb::ToolchainFamily::Msvc) {
-        SKIP("MSVC depfile-backed incremental rebuilds are deferred.");
-    }
+    
 
     auto request = Request(root, toolchain);
     request.hasManifest = true;
@@ -265,9 +261,7 @@ TEST_CASE("library source change rebuilds archive and dependent link", "[execute
     WriteFile(root / "src" / "feature.cpp", "int feature() { return 2; }\n");
 
     const auto toolchain = RequireToolchain(root);
-    if (toolchain.family == scb::ToolchainFamily::Msvc) {
-        SKIP("MSVC depfile-backed incremental rebuilds are deferred.");
-    }
+    
 
     const auto firstResolved = scb::ResolveProject(Request(root, toolchain));
     REQUIRE(firstResolved.ok());
@@ -316,9 +310,7 @@ TEST_CASE("signature changes rebuild executable without source edits", "[execute
     WriteFile(root / "src" / "main.cpp", "#ifndef VALUE\n#define VALUE 0\n#endif\nint main() { return VALUE; }\n");
 
     const auto toolchain = RequireToolchain(root);
-    if (toolchain.family == scb::ToolchainFamily::Msvc) {
-        SKIP("MSVC is conservative in this milestone and always recompiles.");
-    }
+    
 
     auto request = Request(root, toolchain);
     request.hasManifest = true;
@@ -359,9 +351,7 @@ TEST_CASE("missing action state triggers conservative rebuild", "[execute]")
     WriteFile(root / "src" / "main.cpp", "int main() { return 0; }\n");
 
     const auto toolchain = RequireToolchain(root);
-    if (toolchain.family == scb::ToolchainFamily::Msvc) {
-        SKIP("MSVC is conservative in this milestone and always recompiles.");
-    }
+    
 
     const auto firstResolved = scb::ResolveProject(Request(root, toolchain));
     REQUIRE(firstResolved.ok());
@@ -392,9 +382,7 @@ TEST_CASE("corrupt action state triggers conservative rebuild", "[execute]")
     WriteFile(root / "src" / "main.cpp", "int main() { return 0; }\n");
 
     const auto toolchain = RequireToolchain(root);
-    if (toolchain.family == scb::ToolchainFamily::Msvc) {
-        SKIP("MSVC is conservative in this milestone and always recompiles.");
-    }
+    
 
     const auto firstResolved = scb::ResolveProject(Request(root, toolchain));
     REQUIRE(firstResolved.ok());
@@ -417,4 +405,93 @@ TEST_CASE("corrupt action state triggers conservative rebuild", "[execute]")
     REQUIRE(secondBuild.summary.executed == 2);
     REQUIRE(secondBuild.summary.skipped == 0);
     REQUIRE(HasExecutionReason(secondBuild, "action state unreadable: " + compileAction.stateFile.relative));
+}
+
+TEST_CASE("multi-level static library links in dependency-first order", "[execute]")
+{
+    const auto root = MakeTempRoot("library_link_order");
+    WriteFile(root / "src" / "main.cpp", "int front_value();\nint main() { return front_value(); }\n");
+    WriteFile(root / "src" / "front.cpp", "int back_value();\nint front_value() { return back_value() + 1; }\n");
+    WriteFile(root / "src" / "back.cpp", "int back_value() { return 7; }\n");
+
+    const auto toolchain = RequireToolchain(root);
+
+    auto request = Request(root, toolchain);
+    request.hasManifest = true;
+    request.manifest.project.name = "ordered";
+
+    scb::ManifestTarget app;
+    app.name = "ordered";
+    app.kind = scb::TargetKind::Executable;
+    app.sources.include = {"src/main.cpp"};
+    app.dependencies = {{"lib:front"}};
+
+    scb::ManifestTarget front;
+    front.name = "front";
+    front.kind = scb::TargetKind::StaticLibrary;
+    front.sources.include = {"src/front.cpp"};
+    front.dependencies = {{"lib:back"}};
+
+    scb::ManifestTarget back;
+    back.name = "back";
+    back.kind = scb::TargetKind::StaticLibrary;
+    back.sources.include = {"src/back.cpp"};
+
+    request.manifest.targets = {app, front, back};
+
+    const auto resolved = scb::ResolveProject(request);
+    INFO(Diagnostics(resolved.diagnostics));
+    REQUIRE(resolved.ok());
+
+    const auto plan = scb::PlanBuild({resolved.project});
+    INFO(Diagnostics(plan.diagnostics));
+    REQUIRE(plan.ok());
+
+    const auto build = scb::ExecuteBuild({plan.plan});
+    INFO(Diagnostics(build.diagnostics));
+    REQUIRE(build.ok());
+    REQUIRE(build.summary.failed == 0);
+}
+
+TEST_CASE("shared library builds and links into executable", "[execute]")
+{
+    const auto root = MakeTempRoot("shared_library");
+    WriteFile(root / "src" / "main.cpp", "int shared_value();\nint main() { return shared_value(); }\n");
+    WriteFile(root / "src" / "shared.cpp", "int shared_value() { return 42; }\n");
+
+    const auto toolchain = RequireToolchain(root);
+    if (toolchain.family != scb::ToolchainFamily::Gcc &&
+        toolchain.family != scb::ToolchainFamily::Clang) {
+        SKIP("Shared library end-to-end test targets GCC/Clang hosts");
+    }
+
+    auto request = Request(root, toolchain);
+    request.hasManifest = true;
+    request.manifest.project.name = "shared-app";
+
+    scb::ManifestTarget app;
+    app.name = "shared-app";
+    app.kind = scb::TargetKind::Executable;
+    app.sources.include = {"src/main.cpp"};
+    app.dependencies = {{"shared"}};
+
+    scb::ManifestTarget shared;
+    shared.name = "shared";
+    shared.kind = scb::TargetKind::SharedLibrary;
+    shared.sources.include = {"src/shared.cpp"};
+
+    request.manifest.targets = {app, shared};
+
+    const auto resolved = scb::ResolveProject(request);
+    INFO(Diagnostics(resolved.diagnostics));
+    REQUIRE(resolved.ok());
+
+    const auto plan = scb::PlanBuild({resolved.project});
+    INFO(Diagnostics(plan.diagnostics));
+    REQUIRE(plan.ok());
+
+    const auto build = scb::ExecuteBuild({plan.plan});
+    INFO(Diagnostics(build.diagnostics));
+    REQUIRE(build.ok());
+    REQUIRE(build.summary.failed == 0);
 }

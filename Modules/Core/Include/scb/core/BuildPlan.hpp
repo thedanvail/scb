@@ -12,7 +12,8 @@ enum class ActionKind {
 
 enum class DepfileFormat {
     None,
-    GnuMake
+    GnuMake,
+    SourceDependencies
 };
 
 struct PlannedArtifact {
@@ -83,5 +84,7 @@ struct PlanBuildResult {
 [[nodiscard]] PlanBuildResult PlanBuild(const PlanBuildRequest& request);
 [[nodiscard]] std::string ToString(ActionKind kind);
 [[nodiscard]] std::string ToString(DepfileFormat format);
+
+[[nodiscard]] std::string ToJson(const BuildPlan& plan);
 
 } // namespace scb

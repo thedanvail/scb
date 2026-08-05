@@ -1,3 +1,4 @@
+#include "scb/core/DepfileParser.hpp"
 #include "scb/core/ExecuteBuild.hpp"
 
 #include <toml.hpp>
@@ -160,6 +161,9 @@ void EnsureParentDirectory(const std::filesystem::path& path, std::vector<Diagno
     if (value == "gnu-make") {
         return DepfileFormat::GnuMake;
     }
+    if (value == "source-dependencies") {
+        return DepfileFormat::SourceDependencies;
+    }
     return std::nullopt;
 }
 
@@ -304,138 +308,35 @@ void WriteActionState(const ActionNode& action, const ActionState& state, std::v
     }
 }
 
-[[nodiscard]] std::vector<std::filesystem::path> ParseGnuMakeDepfile(
-    const std::filesystem::path& depfile,
-    const std::filesystem::path& workingDirectory,
-    std::vector<Diagnostic>& diagnostics)
-{
-    std::ifstream stream(depfile);
-    if (!stream) {
-        diagnostics.push_back({
-            DiagnosticSeverity::Warning,
-            "failed to open depfile: " + depfile.string(),
-            std::nullopt,
-        });
-        return {};
-    }
-
-    std::string raw;
-    std::string line;
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (!raw.empty()) {
-            raw.push_back('\n');
-        }
-        raw += line;
-    }
-
-    if (raw.empty()) {
-        diagnostics.push_back({
-            DiagnosticSeverity::Warning,
-            "depfile is empty: " + depfile.string(),
-            std::nullopt,
-        });
-        return {};
-    }
-
-    std::string flattened;
-    flattened.reserve(raw.size());
-    for (std::size_t index = 0; index < raw.size(); ++index) {
-        const char current = raw[index];
-        if (current == '\\' && index + 1 < raw.size() && raw[index + 1] == '\n') {
-            ++index;
-            continue;
-        }
-        if (current == '\n') {
-            flattened.push_back(' ');
-            continue;
-        }
-        flattened.push_back(current);
-    }
-
-    std::size_t colon = std::string::npos;
-    bool escaped = false;
-    for (std::size_t index = 0; index < flattened.size(); ++index) {
-        const char current = flattened[index];
-        if (escaped) {
-            escaped = false;
-            continue;
-        }
-        if (current == '\\') {
-            escaped = true;
-            continue;
-        }
-        if (current == ':') {
-            colon = index;
-            break;
-        }
-    }
-
-    if (colon == std::string::npos) {
-        diagnostics.push_back({
-            DiagnosticSeverity::Warning,
-            "depfile is missing target separator: " + depfile.string(),
-            std::nullopt,
-        });
-        return {};
-    }
-
-    std::vector<std::filesystem::path> dependencies;
-    std::string token;
-    escaped = false;
-    for (std::size_t index = colon + 1; index < flattened.size(); ++index) {
-        const char current = flattened[index];
-        if (escaped) {
-            token.push_back(current);
-            escaped = false;
-            continue;
-        }
-        if (current == '\\') {
-            escaped = true;
-            continue;
-        }
-        if (current == ' ' || current == '\t') {
-            if (!token.empty()) {
-                std::filesystem::path path(token);
-                if (path.is_relative()) {
-                    path = (workingDirectory / path).lexically_normal();
-                } else {
-                    path = path.lexically_normal();
-                }
-                dependencies.push_back(std::move(path));
-                token.clear();
-            }
-            continue;
-        }
-        token.push_back(current);
-    }
-    if (!token.empty()) {
-        std::filesystem::path path(token);
-        if (path.is_relative()) {
-            path = (workingDirectory / path).lexically_normal();
-        } else {
-            path = path.lexically_normal();
-        }
-        dependencies.push_back(std::move(path));
-    }
-
-    return dependencies;
-}
-
 struct PreparedActionState {
     bool ok = true;
     ActionState state;
     std::vector<Diagnostic> diagnostics;
 };
 
+[[nodiscard]] std::vector<std::filesystem::path> ParseDepfileForAction(
+    const BuildPlan& plan,
+    const ActionNode& action,
+    std::vector<Diagnostic>& diagnostics)
+{
+    const auto workingDirectory = action.command.workingDirectory.value_or(plan.project.root.absolute);
+    switch (action.depfileFormat) {
+    case DepfileFormat::GnuMake:
+        return ParseGnuMakeDepfile(action.depfile->absolute, workingDirectory, diagnostics);
+    case DepfileFormat::SourceDependencies:
+        return ParseSourceDependenciesFile(action.depfile->absolute, workingDirectory, diagnostics);
+    case DepfileFormat::None:
+        return {};
+    }
+    return {};
+}
+
 [[nodiscard]] PreparedActionState PrepareActionState(const BuildPlan& plan, const ActionNode& action)
 {
     PreparedActionState prepared;
     prepared.state.signature = action.signature;
 
-    if (action.depfileFormat != DepfileFormat::GnuMake) {
+    if (action.depfileFormat == DepfileFormat::None) {
         return prepared;
     }
     if (!action.depfile.has_value()) {
@@ -457,10 +358,7 @@ struct PreparedActionState {
         return prepared;
     }
 
-    auto dependencies = ParseGnuMakeDepfile(
-        action.depfile->absolute,
-        action.command.workingDirectory.value_or(plan.project.root.absolute),
-        prepared.diagnostics);
+    auto dependencies = ParseDepfileForAction(plan, action, prepared.diagnostics);
     if (dependencies.empty()) {
         prepared.ok = false;
         prepared.diagnostics.push_back({
@@ -499,13 +397,9 @@ struct PreparedActionState {
 
 [[nodiscard]] DirtyCheckResult CheckCompileDirty(const BuildPlan& plan, const ActionNode& action, const std::filesystem::path& workingDirectory, ToolchainFamily family)
 {
+    (void)family;
+    (void)workingDirectory;
     DirtyCheckResult result;
-    if (family == ToolchainFamily::Msvc) {
-        result.dirty = true;
-        result.reason = "compiler-assisted dependency tracking is unavailable for msvc";
-        return result;
-    }
-
     if (action.outputs.empty()) {
         result.dirty = true;
         result.reason = "action declares no outputs";
@@ -553,12 +447,6 @@ struct PreparedActionState {
             result.reason = "explicit input changed: " + DisplayPath(input.path);
             return result;
         }
-    }
-
-    if (state.state.discoveredInputs.empty()) {
-        result.dirty = true;
-        result.reason = "action state recorded no discovered dependencies";
-        return result;
     }
 
     for (const auto& storedDependency : state.state.discoveredInputs) {

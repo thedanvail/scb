@@ -85,6 +85,19 @@ if(SCB_BUILD_TESTS)
     )
 
     add_test(
+        NAME scb_cli_plan
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/manifest_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/plan
+            -DSCB_EXPECT_REGEX=\"actions\"
+            -DSCB_EXPECT_NO_ARTIFACT=target/debug/exe/fixture/fixture
+            -DSCB_ARG1=build
+            -DSCB_ARG2=--plan
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFixture.cmake"
+    )
+
+    add_test(
         NAME scb_cli_invalid_compiler
         COMMAND "${CMAKE_COMMAND}"
             -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
@@ -120,6 +133,77 @@ if(SCB_BUILD_TESTS)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ExpectFailure.cmake"
     )
     set_tests_properties(scb_cli_invalid_usage PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    add_test(
+        NAME scb_cli_clean_default_profile
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/zero_config_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/clean_default
+            -DSCB_EXPECT_REGEX=Cleaned.target/debug
+            -DSCB_EXPECT_REMOVED=target/debug
+            -DSCB_ARG1=clean
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunCleanFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_clean_all_profiles
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/zero_config_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/clean_all
+            -DSCB_BUILD_PROFILE=--release
+            -DSCB_EXPECT_REGEX=Cleaned.target/
+            -DSCB_EXPECT_REMOVED=target
+            -DSCB_ARG1=clean
+            -DSCB_ARG2=--all
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunCleanFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_clean_specified_profile
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/zero_config_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/clean_profile
+            -DSCB_BUILD_PROFILE=--release
+            -DSCB_EXPECT_REGEX=Cleaned.target/release
+            -DSCB_EXPECT_REMOVED=target/release
+            -DSCB_EXPECT_PRESERVED=target/debug
+            -DSCB_ARG1=clean
+            -DSCB_ARG2=--profile
+            -DSCB_ARG3=release
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunCleanFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_version
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_WORKING_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}
+            -DSCB_EXPECT_REGEX=scb.*[0-9]+\\.[0-9]+\\.[0-9]+
+            -DSCB_ARG1=--version
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ExpectFailure.cmake"
+    )
+    set_tests_properties(scb_cli_version PROPERTIES
+        WILL_FAIL TRUE
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    add_test(
+        NAME scb_cli_build_help
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_WORKING_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}
+            -DSCB_EXPECT_REGEX=usage:.*scb build
+            -DSCB_ARG1=build
+            -DSCB_ARG2=--help
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ExpectFailure.cmake"
+    )
+    set_tests_properties(scb_cli_build_help PROPERTIES
+        WILL_FAIL TRUE
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     )
 endif()
