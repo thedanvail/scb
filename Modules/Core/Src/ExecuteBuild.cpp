@@ -5,11 +5,15 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <map>
+#include <mutex>
 #include <optional>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -56,16 +60,6 @@ using TomlArray = TomlValue::array_type;
     return std::any_of(diagnostics.begin(), diagnostics.end(), [](const Diagnostic& diagnostic) {
         return diagnostic.severity == DiagnosticSeverity::Error;
     });
-}
-
-[[nodiscard]] std::optional<std::filesystem::file_time_type> SafeLastWriteTime(const std::filesystem::path& path)
-{
-    std::error_code error;
-    const auto value = std::filesystem::last_write_time(path, error);
-    if (error) {
-        return std::nullopt;
-    }
-    return value;
 }
 
 [[nodiscard]] std::string DisplayPath(const ProjectPath& path)
@@ -137,6 +131,91 @@ void EnsureParentDirectory(const std::filesystem::path& path, std::vector<Diagno
         array.emplace_back(value);
     }
     return array;
+}
+
+[[nodiscard]] TomlArray ToTomlArray(const std::vector<FileFingerprint>& values)
+{
+    TomlArray array;
+    array.reserve(values.size());
+    for (const auto& value : values) {
+        TomlTable table;
+        table["path"] = value.path;
+        table["digest"] = value.digest;
+        table["size"] = static_cast<std::int64_t>(value.size);
+        array.emplace_back(table);
+    }
+    return array;
+}
+
+[[nodiscard]] std::optional<std::vector<FileFingerprint>> ReadRequiredFingerprintArray(const TomlTable& table, std::string_view key)
+{
+    const auto it = table.find(std::string(key));
+    if (it == table.end() || !it->second.is_array()) {
+        return std::nullopt;
+    }
+
+    std::vector<FileFingerprint> values;
+    for (const auto& entry : it->second.as_array()) {
+        if (!entry.is_table()) {
+            return std::nullopt;
+        }
+        const auto& fingerprintTable = entry.as_table();
+        const auto pathIt = fingerprintTable.find("path");
+        const auto digestIt = fingerprintTable.find("digest");
+        const auto sizeIt = fingerprintTable.find("size");
+        if (pathIt == fingerprintTable.end() || !pathIt->second.is_string() ||
+            digestIt == fingerprintTable.end() || !digestIt->second.is_string() ||
+            sizeIt == fingerprintTable.end() || !sizeIt->second.is_integer()) {
+            return std::nullopt;
+        }
+
+        FileFingerprint fingerprint;
+        fingerprint.path = pathIt->second.as_string();
+        fingerprint.digest = digestIt->second.as_string();
+        fingerprint.size = static_cast<std::uint64_t>(sizeIt->second.as_integer());
+        values.push_back(std::move(fingerprint));
+    }
+    return values;
+}
+
+[[nodiscard]] std::optional<FileFingerprint> FingerprintFile(const std::filesystem::path& root, const std::filesystem::path& path)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        return std::nullopt;
+    }
+
+    std::uint64_t hash = 1469598103934665603ull;
+    std::uint64_t size = 0;
+    char buffer[8192];
+    while (stream) {
+        stream.read(buffer, sizeof(buffer));
+        const std::streamsize count = stream.gcount();
+        for (std::streamsize index = 0; index < count; ++index) {
+            hash ^= static_cast<unsigned char>(buffer[index]);
+            hash *= 1099511628211ull;
+        }
+        size += static_cast<std::uint64_t>(count);
+    }
+
+    if (!stream.eof()) {
+        return std::nullopt;
+    }
+
+    std::ostringstream digest;
+    digest << std::hex << std::setw(16) << std::setfill('0') << hash;
+
+    FileFingerprint fingerprint;
+    fingerprint.path = StorePath(root, path);
+    fingerprint.digest = digest.str();
+    fingerprint.size = size;
+    return fingerprint;
+}
+
+[[nodiscard]] bool FingerprintMatches(const std::filesystem::path& root, const FileFingerprint& stored)
+{
+    const auto current = FingerprintFile(root, LoadPath(root, stored.path));
+    return current.has_value() && *current == stored;
 }
 
 [[nodiscard]] std::optional<ActionKind> ActionKindFromString(std::string_view value)
@@ -242,12 +321,13 @@ ActionStateLoadResult LoadActionState(const BuildPlan& plan, const ActionNode& a
     state.signature.depfilePath = ReadOptionalString(table, "depfile_path");
     state.signature.explicitInputs = ReadRequiredStringArray(table, "explicit_inputs").value_or(std::vector<std::string>{});
     state.signature.declaredOutputs = ReadRequiredStringArray(table, "declared_outputs").value_or(std::vector<std::string>{});
-    state.discoveredInputs = ReadRequiredStringArray(table, "discovered_inputs").value_or(std::vector<std::string>{});
+    auto explicitFingerprints = ReadRequiredFingerprintArray(table, "explicit_input_fingerprints");
+    auto discoveredFingerprints = ReadRequiredFingerprintArray(table, "discovered_input_fingerprints");
 
     if (state.signature.actionId.empty() || state.signature.ownerTarget.empty() || state.signature.program.empty() ||
         state.signature.workingDirectory.empty() || state.signature.toolchainFamily.empty() ||
         state.signature.toolchainIdentity.empty() || !kind.has_value() || !depfileFormat.has_value() ||
-        state.signature.explicitInputs.empty() || state.signature.declaredOutputs.empty()) {
+        state.signature.declaredOutputs.empty() || !explicitFingerprints.has_value() || !discoveredFingerprints.has_value()) {
         result.found = true;
         result.reason = "action state is missing required fields: " + action.stateFile.relative;
         return result;
@@ -263,6 +343,8 @@ ActionStateLoadResult LoadActionState(const BuildPlan& plan, const ActionNode& a
 
     state.signature.kind = *parsedKind;
     state.signature.depfileFormat = *parsedFormat;
+    state.explicitInputs = std::move(*explicitFingerprints);
+    state.discoveredInputs = std::move(*discoveredFingerprints);
 
     result.found = true;
     result.valid = true;
@@ -289,7 +371,8 @@ void WriteActionState(const ActionNode& action, const ActionState& state, std::v
     }
     table["explicit_inputs"] = ToTomlArray(state.signature.explicitInputs);
     table["declared_outputs"] = ToTomlArray(state.signature.declaredOutputs);
-    table["discovered_inputs"] = ToTomlArray(state.discoveredInputs);
+    table["explicit_input_fingerprints"] = ToTomlArray(state.explicitInputs);
+    table["discovered_input_fingerprints"] = ToTomlArray(state.discoveredInputs);
 
     std::ofstream stream(action.stateFile.absolute);
     if (!stream) {
@@ -339,6 +422,20 @@ struct PreparedActionState {
     PreparedActionState prepared;
     prepared.state.signature = action.signature;
 
+    for (const auto& input : action.inputs) {
+        auto fingerprint = FingerprintFile(plan.project.root.absolute, input.path.absolute);
+        if (!fingerprint.has_value()) {
+            prepared.ok = false;
+            prepared.diagnostics.push_back({
+                DiagnosticSeverity::Error,
+                "failed to fingerprint explicit input: " + DisplayPath(input.path),
+                std::nullopt,
+            });
+            return prepared;
+        }
+        prepared.state.explicitInputs.push_back(std::move(*fingerprint));
+    }
+
     if (action.depfileFormat == DepfileFormat::None) {
         return prepared;
     }
@@ -374,28 +471,23 @@ struct PreparedActionState {
 
     std::set<std::string> seen;
     for (const auto& dependency : dependencies) {
-        seen.insert(StorePath(plan.project.root.absolute, dependency));
+        const auto storedPath = StorePath(plan.project.root.absolute, dependency);
+        if (!seen.insert(storedPath).second) {
+            continue;
+        }
+        auto fingerprint = FingerprintFile(plan.project.root.absolute, dependency);
+        if (!fingerprint.has_value()) {
+            prepared.ok = false;
+            prepared.diagnostics.push_back({
+                DiagnosticSeverity::Error,
+                "failed to fingerprint discovered dependency: " + storedPath,
+                std::nullopt,
+            });
+            return prepared;
+        }
+        prepared.state.discoveredInputs.push_back(std::move(*fingerprint));
     }
-    prepared.state.discoveredInputs.assign(seen.begin(), seen.end());
     return prepared;
-}
-
-[[nodiscard]] std::optional<std::filesystem::file_time_type> OldestOutputTime(const ActionNode& action)
-{
-    std::optional<std::filesystem::file_time_type> oldest;
-    for (const auto& output : action.outputs) {
-        if (!std::filesystem::exists(output.path.absolute)) {
-            return std::nullopt;
-        }
-        const auto writeTime = SafeLastWriteTime(output.path.absolute);
-        if (!writeTime.has_value()) {
-            return std::nullopt;
-        }
-        if (!oldest.has_value() || *writeTime < *oldest) {
-            oldest = *writeTime;
-        }
-    }
-    return oldest;
 }
 
 [[nodiscard]] DirtyCheckResult CheckCompileDirty(const BuildPlan& plan, const ActionNode& action, const std::filesystem::path& workingDirectory, ToolchainFamily family)
@@ -430,39 +522,32 @@ struct PreparedActionState {
         return result;
     }
 
-    const auto outputTime = OldestOutputTime(action);
-    if (!outputTime.has_value()) {
-        result.dirty = true;
-        result.reason = "failed to read output timestamp";
-        return result;
-    }
-
     for (const auto& input : action.inputs) {
         if (!std::filesystem::exists(input.path.absolute)) {
             result.dirty = true;
             result.reason = "explicit input missing: " + DisplayPath(input.path);
             return result;
         }
+    }
 
-        const auto inputTime = SafeLastWriteTime(input.path.absolute);
-        if (!inputTime.has_value() || *inputTime > *outputTime) {
+    for (const auto& fingerprint : state.state.explicitInputs) {
+        if (!FingerprintMatches(plan.project.root.absolute, fingerprint)) {
             result.dirty = true;
-            result.reason = "explicit input changed: " + DisplayPath(input.path);
+            result.reason = "explicit input changed: " + fingerprint.path;
             return result;
         }
     }
 
-    for (const auto& storedDependency : state.state.discoveredInputs) {
-        const auto dependency = LoadPath(plan.project.root.absolute, storedDependency);
+    for (const auto& fingerprint : state.state.discoveredInputs) {
+        const auto dependency = LoadPath(plan.project.root.absolute, fingerprint.path);
         if (!std::filesystem::exists(dependency)) {
             result.dirty = true;
-            result.reason = "discovered dependency missing: " + storedDependency;
+            result.reason = "discovered dependency missing: " + fingerprint.path;
             return result;
         }
-        const auto dependencyTime = SafeLastWriteTime(dependency);
-        if (!dependencyTime.has_value() || *dependencyTime > *outputTime) {
+        if (!FingerprintMatches(plan.project.root.absolute, fingerprint)) {
             result.dirty = true;
-            result.reason = "discovered dependency changed: " + storedDependency;
+            result.reason = "discovered dependency changed: " + fingerprint.path;
             return result;
         }
     }
@@ -502,23 +587,18 @@ struct PreparedActionState {
         return result;
     }
 
-    const auto outputTime = OldestOutputTime(action);
-    if (!outputTime.has_value()) {
-        result.dirty = true;
-        result.reason = "failed to read output timestamp";
-        return result;
-    }
-
     for (const auto& input : action.inputs) {
         if (!std::filesystem::exists(input.path.absolute)) {
             result.dirty = true;
             result.reason = "explicit input missing: " + DisplayPath(input.path);
             return result;
         }
-        const auto inputTime = SafeLastWriteTime(input.path.absolute);
-        if (!inputTime.has_value() || *inputTime > *outputTime) {
+    }
+
+    for (const auto& fingerprint : state.state.explicitInputs) {
+        if (!FingerprintMatches(plan.project.root.absolute, fingerprint)) {
             result.dirty = true;
-            result.reason = "explicit input changed: " + DisplayPath(input.path);
+            result.reason = "explicit input changed: " + fingerprint.path;
             return result;
         }
     }
@@ -869,103 +949,239 @@ std::string ToString(ActionStatus status)
     return "unknown";
 }
 
-ExecuteBuildResult ExecuteBuild(const ExecuteBuildRequest& request)
+[[nodiscard]] bool ValidateActionOrdering(const BuildPlan& plan, std::vector<Diagnostic>& diagnostics)
 {
-    ExecuteBuildResult result;
     std::map<std::string, std::size_t> indexById;
-    for (std::size_t index = 0; index < request.plan.actions.size(); ++index) {
-        indexById.emplace(request.plan.actions[index].id, index);
+    for (std::size_t index = 0; index < plan.actions.size(); ++index) {
+        indexById.emplace(plan.actions[index].id, index);
     }
 
-    for (std::size_t index = 0; index < request.plan.actions.size(); ++index) {
-        for (const auto& dependency : request.plan.actions[index].dependencies) {
+    for (std::size_t index = 0; index < plan.actions.size(); ++index) {
+        for (const auto& dependency : plan.actions[index].dependencies) {
             const auto it = indexById.find(dependency);
             if (it == indexById.end()) {
-                result.diagnostics.push_back({DiagnosticSeverity::Error, "action references unknown dependency: " + dependency, std::nullopt});
-                return result;
+                diagnostics.push_back({DiagnosticSeverity::Error, "action references unknown dependency: " + dependency, std::nullopt});
+                return false;
             }
             if (it->second >= index) {
-                result.diagnostics.push_back({DiagnosticSeverity::Error, "action dependency is not ordered before dependent action: " + dependency, std::nullopt});
-                return result;
+                diagnostics.push_back({DiagnosticSeverity::Error, "action dependency is not ordered before dependent action: " + dependency, std::nullopt});
+                return false;
             }
         }
+    }
+    return true;
+}
+
+[[nodiscard]] ActionExecution ExecuteAction(
+    const BuildPlan& plan,
+    const ActionNode& action,
+    bool dryRun,
+    std::vector<Diagnostic>& diagnostics)
+{
+    ActionExecution execution;
+    execution.actionId = action.id;
+
+    const auto dirty = CheckDirty(plan, action);
+    diagnostics.insert(diagnostics.end(), dirty.diagnostics.begin(), dirty.diagnostics.end());
+    if (HasErrors(diagnostics)) {
+        execution.status = ActionStatus::Failed;
+        execution.exitCode = 1;
+        execution.reason = dirty.reason;
+        return execution;
+    }
+    if (!dirty.dirty) {
+        execution.status = ActionStatus::Skipped;
+        execution.reason = dirty.reason;
+        return execution;
+    }
+
+    if (dryRun) {
+        execution.status = ActionStatus::Executed;
+        execution.reason = dirty.reason;
+        return execution;
+    }
+
+    for (const auto& output : action.outputs) {
+        EnsureParentDirectory(output.path.absolute, diagnostics);
+    }
+    if (action.depfile.has_value()) {
+        EnsureParentDirectory(action.depfile->absolute, diagnostics);
+    }
+    EnsureParentDirectory(action.stateFile.absolute, diagnostics);
+    if (HasErrors(diagnostics)) {
+        execution.status = ActionStatus::Failed;
+        execution.exitCode = 1;
+        execution.reason = "failed to prepare output directories";
+        return execution;
+    }
+
+    const auto process = RunProcess(action.command, diagnostics);
+    execution.stdoutText = process.stdoutText;
+    execution.stderrText = process.stderrText;
+    execution.exitCode = process.exitCode;
+
+    if (process.exitCode != 0) {
+        execution.status = ActionStatus::Failed;
+        execution.reason = dirty.reason;
+        diagnostics.push_back({
+            DiagnosticSeverity::Error,
+            "action failed: " + action.label + " (" + CommandString(action.command) + ")",
+            std::nullopt,
+        });
+        return execution;
+    }
+
+    const auto preparedState = PrepareActionState(plan, action);
+    diagnostics.insert(diagnostics.end(), preparedState.diagnostics.begin(), preparedState.diagnostics.end());
+    if (!preparedState.ok || HasErrors(diagnostics)) {
+        execution.status = ActionStatus::Failed;
+        execution.reason = "failed to capture action state";
+        execution.exitCode = 1;
+        return execution;
+    }
+
+    WriteActionState(action, preparedState.state, diagnostics);
+    if (HasErrors(diagnostics)) {
+        execution.status = ActionStatus::Failed;
+        execution.reason = "failed to write action state";
+        execution.exitCode = 1;
+        return execution;
+    }
+    execution.status = ActionStatus::Executed;
+    execution.reason = dirty.reason;
+    return execution;
+}
+
+void CountExecution(BuildSummary& summary, const ActionExecution& execution)
+{
+    switch (execution.status) {
+    case ActionStatus::Skipped:
+        summary.skipped += 1;
+        break;
+    case ActionStatus::Executed:
+        summary.executed += 1;
+        break;
+    case ActionStatus::Failed:
+        summary.failed += 1;
+        break;
+    }
+}
+
+[[nodiscard]] ExecuteBuildResult ExecuteBuildSequential(const ExecuteBuildRequest& request)
+{
+    ExecuteBuildResult result;
+    if (!ValidateActionOrdering(request.plan, result.diagnostics)) {
+        return result;
     }
 
     for (const auto& action : request.plan.actions) {
-        ActionExecution execution;
-        execution.actionId = action.id;
-
-        const auto dirty = CheckDirty(request.plan, action);
-        result.diagnostics.insert(result.diagnostics.end(), dirty.diagnostics.begin(), dirty.diagnostics.end());
-        if (!dirty.dirty) {
-            execution.status = ActionStatus::Skipped;
-            execution.reason = dirty.reason;
-            result.summary.skipped += 1;
-            result.summary.actions.push_back(std::move(execution));
-            continue;
-        }
-
-        if (request.dryRun) {
-            execution.status = ActionStatus::Executed;
-            execution.reason = dirty.reason;
-            result.summary.executed += 1;
-            result.summary.actions.push_back(std::move(execution));
-            continue;
-        }
-
-        for (const auto& output : action.outputs) {
-            EnsureParentDirectory(output.path.absolute, result.diagnostics);
-        }
-        if (action.depfile.has_value()) {
-            EnsureParentDirectory(action.depfile->absolute, result.diagnostics);
-        }
-        EnsureParentDirectory(action.stateFile.absolute, result.diagnostics);
-        if (HasErrors(result.diagnostics)) {
-            execution.status = ActionStatus::Failed;
-            execution.exitCode = 1;
-            execution.reason = "failed to prepare output directories";
-            result.summary.failed += 1;
-            result.summary.actions.push_back(std::move(execution));
-            return result;
-        }
-
-        const auto process = RunProcess(action.command, result.diagnostics);
-        execution.stdoutText = process.stdoutText;
-        execution.stderrText = process.stderrText;
-        execution.exitCode = process.exitCode;
-
-        if (process.exitCode != 0) {
-            execution.status = ActionStatus::Failed;
-            execution.reason = dirty.reason;
-            result.summary.failed += 1;
-            result.summary.actions.push_back(std::move(execution));
-            result.diagnostics.push_back({
-                DiagnosticSeverity::Error,
-                "action failed: " + action.label + " (" + CommandString(action.command) + ")",
-                std::nullopt,
-            });
-            return result;
-        }
-
-        const auto preparedState = PrepareActionState(request.plan, action);
-        result.diagnostics.insert(result.diagnostics.end(), preparedState.diagnostics.begin(), preparedState.diagnostics.end());
-        if (!preparedState.ok || HasErrors(result.diagnostics)) {
-            execution.status = ActionStatus::Failed;
-            execution.reason = "failed to capture action state";
-            execution.exitCode = 1;
-            result.summary.failed += 1;
-            result.summary.actions.push_back(std::move(execution));
-            return result;
-        }
-
-        WriteActionState(action, preparedState.state, result.diagnostics);
-        execution.status = ActionStatus::Executed;
-        execution.reason = dirty.reason;
-        result.summary.executed += 1;
+        std::vector<Diagnostic> diagnostics;
+        auto execution = ExecuteAction(request.plan, action, request.dryRun, diagnostics);
+        result.diagnostics.insert(result.diagnostics.end(), diagnostics.begin(), diagnostics.end());
+        CountExecution(result.summary, execution);
         result.summary.actions.push_back(std::move(execution));
+        if (result.summary.failed != 0) {
+            return result;
+        }
     }
 
     return result;
+}
+
+[[nodiscard]] ExecuteBuildResult ExecuteBuildParallel(const ExecuteBuildRequest& request)
+{
+    ExecuteBuildResult result;
+    if (!ValidateActionOrdering(request.plan, result.diagnostics)) {
+        return result;
+    }
+
+    const std::size_t actionCount = request.plan.actions.size();
+    std::map<std::string, std::size_t> indexById;
+    std::vector<std::vector<std::size_t>> dependents(actionCount);
+    std::vector<std::size_t> remaining(actionCount, 0);
+    for (std::size_t index = 0; index < actionCount; ++index) {
+        indexById.emplace(request.plan.actions[index].id, index);
+    }
+    for (std::size_t index = 0; index < actionCount; ++index) {
+        remaining[index] = request.plan.actions[index].dependencies.size();
+        for (const auto& dependency : request.plan.actions[index].dependencies) {
+            dependents[indexById[dependency]].push_back(index);
+        }
+    }
+
+    std::queue<std::size_t> ready;
+    for (std::size_t index = 0; index < actionCount; ++index) {
+        if (remaining[index] == 0) {
+            ready.push(index);
+        }
+    }
+
+    std::vector<bool> completed(actionCount, false);
+    std::vector<ActionExecution> executions(actionCount);
+    std::size_t finished = 0;
+    bool failed = false;
+    std::mutex mutex;
+
+    const std::size_t workerCount = std::max<std::size_t>(1, request.jobs);
+    auto worker = [&]() {
+        while (true) {
+            std::size_t index = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (failed || ready.empty()) {
+                    return;
+                }
+                index = ready.front();
+                ready.pop();
+            }
+
+            std::vector<Diagnostic> diagnostics;
+            auto execution = ExecuteAction(request.plan, request.plan.actions[index], request.dryRun, diagnostics);
+
+            std::lock_guard<std::mutex> lock(mutex);
+            result.diagnostics.insert(result.diagnostics.end(), diagnostics.begin(), diagnostics.end());
+            executions[index] = std::move(execution);
+            completed[index] = true;
+            finished += 1;
+            if (executions[index].status == ActionStatus::Failed) {
+                failed = true;
+                continue;
+            }
+            for (const std::size_t dependent : dependents[index]) {
+                remaining[dependent] -= 1;
+                if (remaining[dependent] == 0) {
+                    ready.push(dependent);
+                }
+            }
+        }
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+    for (std::size_t index = 0; index < workerCount; ++index) {
+        workers.emplace_back(worker);
+    }
+    for (auto& thread : workers) {
+        thread.join();
+    }
+
+    for (std::size_t index = 0; index < actionCount; ++index) {
+        if (!completed[index]) {
+            continue;
+        }
+        CountExecution(result.summary, executions[index]);
+        result.summary.actions.push_back(std::move(executions[index]));
+    }
+
+    return result;
+}
+
+ExecuteBuildResult ExecuteBuild(const ExecuteBuildRequest& request)
+{
+    if (request.jobs <= 1 || request.plan.actions.size() <= 1) {
+        return ExecuteBuildSequential(request);
+    }
+    return ExecuteBuildParallel(request);
 }
 
 } // namespace scb

@@ -30,6 +30,7 @@ struct ExecuteBuildRequest {
     BuildPlan plan;
     bool dryRun = false;
     bool verbose = false;
+    std::size_t jobs = 1;
 };
 
 struct ExecuteBuildResult {

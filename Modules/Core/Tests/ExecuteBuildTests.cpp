@@ -183,6 +183,102 @@ TEST_CASE("executor drains large stdout and stderr without deadlock", "[execute]
 }
 #endif
 
+#ifndef _WIN32
+scb::ActionNode ShellAction(
+    const std::filesystem::path& root,
+    const std::string& id,
+    const std::string& script,
+    const std::vector<std::string>& dependencies = {})
+{
+    scb::ActionNode action;
+    action.id = id;
+    action.kind = scb::ActionKind::Link;
+    action.label = id;
+    action.owner = {scb::TargetKind::Executable, "synthetic"};
+    action.dependencies = dependencies;
+    action.outputs.push_back({{root / "out" / id, "out/" + id}});
+    action.stateFile = {root / "target" / "debug" / ".scb" / "actions" / (id + ".toml"), "target/debug/.scb/actions/" + id + ".toml"};
+    action.command.program = "/bin/sh";
+    action.command.workingDirectory = root;
+    action.command.args = {"-c", script};
+    action.signature.actionId = action.id;
+    action.signature.kind = action.kind;
+    action.signature.ownerTarget = "exe:synthetic";
+    action.signature.program = action.command.program;
+    action.signature.args = action.command.args;
+    action.signature.workingDirectory = root.string();
+    action.signature.toolchainFamily = "gcc";
+    action.signature.toolchainVersion = "test";
+    action.signature.toolchainIdentity = "test-identity";
+    action.signature.declaredOutputs = {"out/" + id};
+    return action;
+}
+
+TEST_CASE("executor runs independent actions concurrently with jobs", "[execute]")
+{
+    const auto root = MakeTempRoot("parallel_independent");
+
+    scb::BuildPlan plan;
+    plan.project.root.absolute = root;
+    plan.project.root.relative = ".";
+    plan.project.toolchain.family = scb::ToolchainFamily::Gcc;
+    plan.actions = {
+        ShellAction(root, "first", "sleep 1; mkdir -p out; printf first > out/first"),
+        ShellAction(root, "second", "sleep 1; mkdir -p out; printf second > out/second"),
+    };
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = scb::ExecuteBuild({plan, false, false, 2});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    INFO(Diagnostics(result.diagnostics));
+    REQUIRE(result.ok());
+    REQUIRE(result.summary.executed == 2);
+    REQUIRE(elapsed < std::chrono::milliseconds(1800));
+}
+
+TEST_CASE("executor respects dependencies with jobs", "[execute]")
+{
+    const auto root = MakeTempRoot("parallel_dependencies");
+
+    scb::BuildPlan plan;
+    plan.project.root.absolute = root;
+    plan.project.root.relative = ".";
+    plan.project.toolchain.family = scb::ToolchainFamily::Gcc;
+    plan.actions = {
+        ShellAction(root, "first", "mkdir -p out; printf ready > out/first"),
+        ShellAction(root, "second", "test \"$(cat out/first)\" = ready; printf second > out/second", {"first"}),
+    };
+
+    const auto result = scb::ExecuteBuild({plan, false, false, 2});
+
+    INFO(Diagnostics(result.diagnostics));
+    REQUIRE(result.ok());
+    REQUIRE(result.summary.executed == 2);
+}
+
+TEST_CASE("executor does not launch dependents after a parallel failure", "[execute]")
+{
+    const auto root = MakeTempRoot("parallel_fail_fast");
+
+    scb::BuildPlan plan;
+    plan.project.root.absolute = root;
+    plan.project.root.relative = ".";
+    plan.project.toolchain.family = scb::ToolchainFamily::Gcc;
+    plan.actions = {
+        ShellAction(root, "first", "exit 3"),
+        ShellAction(root, "second", "mkdir -p out; printf second > out/second", {"first"}),
+    };
+
+    const auto result = scb::ExecuteBuild({plan, false, false, 2});
+
+    REQUIRE_FALSE(result.ok());
+    REQUIRE(result.summary.failed == 1);
+    REQUIRE(result.summary.actions.size() == 1);
+    REQUIRE_FALSE(std::filesystem::exists(root / "out" / "second"));
+}
+#endif
+
 TEST_CASE("executor builds and skips zero-config executable", "[execute]")
 {
     const auto root = MakeTempRoot("build_and_skip");
@@ -404,8 +500,8 @@ TEST_CASE("missing action state triggers conservative rebuild", "[execute]")
     const auto secondBuild = scb::ExecuteBuild({secondPlan.plan});
     INFO(Diagnostics(secondBuild.diagnostics));
     REQUIRE(secondBuild.ok());
-    REQUIRE(secondBuild.summary.executed == 2);
-    REQUIRE(secondBuild.summary.skipped == 0);
+    REQUIRE(secondBuild.summary.executed == 1);
+    REQUIRE(secondBuild.summary.skipped == 1);
     REQUIRE(HasExecutionReason(secondBuild, "action state missing: " + compileAction.stateFile.relative));
 }
 
@@ -435,9 +531,37 @@ TEST_CASE("corrupt action state triggers conservative rebuild", "[execute]")
     const auto secondBuild = scb::ExecuteBuild({secondPlan.plan});
     INFO(Diagnostics(secondBuild.diagnostics));
     REQUIRE(secondBuild.ok());
-    REQUIRE(secondBuild.summary.executed == 2);
-    REQUIRE(secondBuild.summary.skipped == 0);
+    REQUIRE(secondBuild.summary.executed == 1);
+    REQUIRE(secondBuild.summary.skipped == 1);
     REQUIRE(HasExecutionReason(secondBuild, "action state unreadable: " + compileAction.stateFile.relative));
+}
+
+TEST_CASE("touching unchanged source does not rebuild with content fingerprints", "[execute]")
+{
+    const auto root = MakeTempRoot("touch_unchanged_source");
+    WriteFile(root / "src" / "main.cpp", "int main() { return 0; }\n");
+
+    const auto toolchain = RequireToolchain(root);
+
+    const auto firstResolved = scb::ResolveProject(Request(root, toolchain));
+    REQUIRE(firstResolved.ok());
+    const auto firstPlan = scb::PlanBuild({firstResolved.project});
+    REQUIRE(firstPlan.ok());
+    const auto firstBuild = scb::ExecuteBuild({firstPlan.plan});
+    INFO(Diagnostics(firstBuild.diagnostics));
+    REQUIRE(firstBuild.ok());
+
+    BumpTimestamp(root / "src" / "main.cpp");
+
+    const auto secondResolved = scb::ResolveProject(Request(root, toolchain));
+    REQUIRE(secondResolved.ok());
+    const auto secondPlan = scb::PlanBuild({secondResolved.project});
+    REQUIRE(secondPlan.ok());
+    const auto secondBuild = scb::ExecuteBuild({secondPlan.plan});
+    INFO(Diagnostics(secondBuild.diagnostics));
+    REQUIRE(secondBuild.ok());
+    REQUIRE(secondBuild.summary.executed == 0);
+    REQUIRE(secondBuild.summary.skipped == 2);
 }
 
 TEST_CASE("multi-level static library links in dependency-first order", "[execute]")

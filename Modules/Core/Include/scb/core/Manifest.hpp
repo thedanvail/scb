@@ -10,6 +10,7 @@ namespace scb {
 
 enum class TargetKind {
     Executable,
+    TestExecutable,
     StaticLibrary,
     SharedLibrary,
     HeaderOnly

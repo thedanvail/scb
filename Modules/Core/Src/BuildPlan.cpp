@@ -85,6 +85,23 @@ namespace {
 #endif
 }
 
+[[nodiscard]] std::string LoaderRelativeRpath(const std::filesystem::path& executable, const std::filesystem::path& library)
+{
+    const auto executableDirectory = executable.parent_path();
+    const auto libraryDirectory = library.parent_path();
+    auto relative = libraryDirectory.lexically_relative(executableDirectory).generic_string();
+    if (relative.empty() || relative == ".") {
+        relative.clear();
+    } else {
+        relative = "/" + relative;
+    }
+#ifdef __APPLE__
+    return "-Wl,-rpath,@loader_path" + relative;
+#else
+    return "-Wl,-rpath,$ORIGIN" + relative;
+#endif
+}
+
 [[nodiscard]] ProjectPath MakePath(const std::filesystem::path& root, const std::filesystem::path& relative)
 {
     const auto normalizedRelative = relative.lexically_normal();
@@ -403,14 +420,12 @@ void AddStandardFlag(const ResolvedBuildOptions& build, ToolchainFamily family, 
     }
     args.insert(args.end(), target.build.linkFlags.begin(), target.build.linkFlags.end());
 
-    // Embed rpaths so locally-built shared libraries can be found at runtime
-    // without requiring LD_LIBRARY_PATH.
     std::set<std::string> rpathDirectories;
     for (const auto& library : libraries) {
-        rpathDirectories.insert(library.absolute.parent_path().string());
+        rpathDirectories.insert(LoaderRelativeRpath(output.absolute, library.absolute));
     }
-    for (const auto& directory : rpathDirectories) {
-        args.push_back("-Wl,-rpath," + directory);
+    for (const auto& rpath : rpathDirectories) {
+        args.push_back(rpath);
     }
 
     args.push_back("-o");
@@ -451,6 +466,9 @@ void AddStandardFlag(const ResolvedBuildOptions& build, ToolchainFamily family, 
     command.program = project.toolchain.compilerPath;
     args.push_back("-shared");
     args.push_back("-fPIC");
+#ifdef __APPLE__
+    args.push_back("-Wl,-install_name,@rpath/" + output.absolute.filename().string());
+#endif
     for (const auto& object : objects) {
         args.push_back(object.absolute.string());
     }
@@ -839,7 +857,7 @@ PlanBuildResult PlanBuild(const PlanBuildRequest& request)
     }
 
     for (const auto& target : request.project.targets) {
-        if (target.id.kind != TargetKind::Executable) {
+        if (target.id.kind != TargetKind::Executable && target.id.kind != TargetKind::TestExecutable) {
             continue;
         }
 
@@ -851,7 +869,7 @@ PlanBuildResult PlanBuild(const PlanBuildRequest& request)
         action.id = "link:" + targetKey;
         action.kind = ActionKind::Link;
         action.owner = target.id;
-        action.label = "Link " + target.id.name;
+        action.label = target.id.kind == TargetKind::TestExecutable ? "Link test " + target.id.name : "Link " + target.id.name;
         action.dependencies = compileActionsByTarget[targetKey];
 
         std::vector<ProjectPath> libraryOutputs;

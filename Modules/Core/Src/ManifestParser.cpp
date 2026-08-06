@@ -211,6 +211,9 @@ void ParseBuildOptions(
     if (*string == "exe") {
         return TargetKind::Executable;
     }
+    if (*string == "test") {
+        return TargetKind::TestExecutable;
+    }
     if (*string == "static-lib" || *string == "lib") {
         return TargetKind::StaticLibrary;
     }

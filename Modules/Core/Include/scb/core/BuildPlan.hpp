@@ -2,6 +2,8 @@
 
 #include "scb/core/ResolvedProject.hpp"
 
+#include <cstdint>
+
 namespace scb {
 
 enum class ActionKind {
@@ -44,9 +46,18 @@ struct ActionSignature {
     [[nodiscard]] bool operator==(const ActionSignature&) const = default;
 };
 
+struct FileFingerprint {
+    std::string path;
+    std::string digest;
+    std::uint64_t size = 0;
+
+    [[nodiscard]] bool operator==(const FileFingerprint&) const = default;
+};
+
 struct ActionState {
     ActionSignature signature;
-    std::vector<std::string> discoveredInputs;
+    std::vector<FileFingerprint> explicitInputs;
+    std::vector<FileFingerprint> discoveredInputs;
 
     [[nodiscard]] bool operator==(const ActionState&) const = default;
 };

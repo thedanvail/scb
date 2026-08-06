@@ -1,0 +1,11 @@
+[project]
+name = "profiled"
+
+[profile.custom]
+optimization = "size"
+debug_info = false
+
+[[target]]
+name = "profiled"
+kind = "exe"
+sources = { include = ["src/main.cpp"] }

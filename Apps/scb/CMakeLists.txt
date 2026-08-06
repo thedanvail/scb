@@ -45,6 +45,60 @@ if(SCB_BUILD_TESTS)
     )
 
     add_test(
+        NAME scb_cli_build_profile_release
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/manifest_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/profile_release
+            -DSCB_EXPECT_REGEX=Profile:.release
+            -DSCB_EXPECT_ARTIFACT=target/release/exe/fixture/fixture
+            -DSCB_ARG1=build
+            -DSCB_ARG2=--profile
+            -DSCB_ARG3=release
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_build_custom_profile
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/profile_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/profile_custom
+            -DSCB_EXPECT_REGEX=Profile:.custom
+            -DSCB_EXPECT_ARTIFACT=target/custom/exe/profiled/profiled
+            -DSCB_ARG1=build
+            -DSCB_ARG2=--profile
+            -DSCB_ARG3=custom
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_build_release_profile_conflict
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/profile_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/profile_conflict
+            -DSCB_EXPECT_REGEX=cannot.combine.--release.with.--profile
+            -DSCB_ARG1=build
+            -DSCB_ARG2=--release
+            -DSCB_ARG3=--profile
+            -DSCB_ARG4=custom
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFailureFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_plan_toml_rejected
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/manifest_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/plan_toml
+            -DSCB_EXPECT_REGEX=usage:.*scb.build
+            -DSCB_ARG1=build
+            -DSCB_ARG2=--plan=toml
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFailureFixture.cmake"
+    )
+
+    add_test(
         NAME scb_cli_manifest_path
         COMMAND "${CMAKE_COMMAND}"
             -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
@@ -95,6 +149,55 @@ if(SCB_BUILD_TESTS)
             -DSCB_ARG1=build
             -DSCB_ARG2=--plan
             -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_test_zero_config
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/test_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/test_project
+            -DSCB_EXPECT_REGEX=Finished.debug:.*tests.passed
+            -DSCB_EXPECT_ARTIFACT=target/debug/test/basic/basic
+            -DSCB_ARG1=test
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_test_dry_run
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/test_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/test_dry_run
+            -DSCB_EXPECT_REGEX=Would.run.target/debug/test/basic/basic
+            -DSCB_EXPECT_NO_ARTIFACT=target/debug/test/basic/basic
+            -DSCB_ARG1=test
+            -DSCB_ARG2=--dry-run
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_test_release
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/test_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/test_release
+            -DSCB_EXPECT_REGEX=Profile:.release
+            -DSCB_EXPECT_ARTIFACT=target/release/test/basic/basic
+            -DSCB_ARG1=test
+            -DSCB_ARG2=--release
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFixture.cmake"
+    )
+
+    add_test(
+        NAME scb_cli_test_failure
+        COMMAND "${CMAKE_COMMAND}"
+            -DSCB_EXECUTABLE=$<TARGET_FILE:scb>
+            -DSCB_FIXTURE_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/Tests/fixtures/failing_test_project
+            -DSCB_TEMP_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures/test_failure
+            -DSCB_EXPECT_REGEX=intentional.test.failure
+            -DSCB_ARG1=test
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/RunFailureFixture.cmake"
     )
 
     add_test(

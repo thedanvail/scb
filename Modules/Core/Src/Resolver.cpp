@@ -514,6 +514,9 @@ void ApplyTargetOptions(PendingBuildOptions& resolved, const ManifestTarget& tar
     if (value == "exe") {
         return TargetKind::Executable;
     }
+    if (value == "test") {
+        return TargetKind::TestExecutable;
+    }
     if (value == "lib" || value == "static-lib") {
         return TargetKind::StaticLibrary;
     }
@@ -547,7 +550,7 @@ void ApplyTargetOptions(PendingBuildOptions& resolved, const ManifestTarget& tar
             diagnostics.push_back({DiagnosticSeverity::Error, std::string(context) + " references unknown dependency: " + dependency.value});
             return std::nullopt;
         }
-        if (id.kind == TargetKind::Executable) {
+        if (id.kind == TargetKind::Executable || id.kind == TargetKind::TestExecutable) {
             diagnostics.push_back({DiagnosticSeverity::Error, std::string(context) + " cannot depend on executable target: " + dependency.value});
             return std::nullopt;
         }
@@ -556,7 +559,7 @@ void ApplyTargetOptions(PendingBuildOptions& resolved, const ManifestTarget& tar
 
     std::vector<TargetId> matches;
     for (const auto& target : targets) {
-        if (target.name == dependency.value && target.kind != TargetKind::Executable) {
+        if (target.name == dependency.value && target.kind != TargetKind::Executable && target.kind != TargetKind::TestExecutable) {
             matches.push_back(target);
         }
     }
@@ -633,6 +636,8 @@ std::string ToString(TargetKind kind)
     switch (kind) {
     case TargetKind::Executable:
         return "exe";
+    case TargetKind::TestExecutable:
+        return "test";
     case TargetKind::StaticLibrary:
         return "lib";
     case TargetKind::SharedLibrary:
